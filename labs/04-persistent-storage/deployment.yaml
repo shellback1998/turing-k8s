@@ -1,0 +1,36 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: storage-demo
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: storage-demo
+
+  template:
+    metadata:
+      labels:
+        app: storage-demo
+
+    spec:
+      containers:
+        - name: storage-demo
+          image: alpine:latest
+          command:
+            - /bin/sh
+            - -c
+            - sleep 3600
+
+          volumeMounts:
+            - name: persistent-storage
+              mountPath: /data
+
+      volumes:
+        - name: persistent-storage
+          persistentVolumeClaim:
+            claimName: lab-storage
