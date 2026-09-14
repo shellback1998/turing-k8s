@@ -6,7 +6,7 @@ metadata:
   name: configmap-nginx
 
 spec:
-  type: NodePort
+  type: ClusterIP
 
   selector:
     app: configmap-nginx
@@ -15,4 +15,3 @@ spec:
     - protocol: TCP
       port: 80
       targetPort: 80
-      nodePort: 31554

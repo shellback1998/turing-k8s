@@ -1,0 +1,21 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+
+metadata:
+  name: configmap-nginx-ingress
+
+spec:
+  ingressClassName: traefik
+
+  rules:
+    - host: configmap.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: configmap-nginx
+                port:
+                  number: 80
