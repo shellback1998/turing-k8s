@@ -1,5 +1,5 @@
 ---
-- name: Deploy Turing Pi Voting App to K3s
+- name: Manage Turing Pi Voting App on K3s
   hosts: k8s_manager
   become: true
 
@@ -8,64 +8,111 @@
 
   tasks:
 
-    - name: Create voting-app namespace
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/namespace.yaml
+    # ============================================================
+    # DESTROY
+    # ============================================================
 
-    - name: Apply PostgreSQL Secret
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/postgres-secret.yaml
+    - name: Destroy Voting App
+      block:
 
-    - name: Deploy Redis
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/redis.yaml
+        - name: Delete voting-app namespace
+          ansible.builtin.command:
+            cmd: kubectl delete namespace voting-app --ignore-not-found=true
 
-    - name: Deploy PostgreSQL
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/postgres.yaml
+        - name: Wait for voting-app namespace to disappear
+          ansible.builtin.command:
+            cmd: kubectl get namespace voting-app
+          register: namespace_check
+          until: namespace_check.rc != 0
+          retries: 30
+          delay: 2
+          changed_when: false
+          failed_when: false
 
-    - name: Deploy Vote application
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/vote.yaml
+        - name: Confirm Voting App namespace is gone
+          ansible.builtin.debug:
+            msg: "Voting App has been destroyed."
 
-    - name: Deploy Worker
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/worker.yaml
+      tags:
+        - destroy
 
-    - name: Deploy Result application
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/result.yaml
 
-    - name: Deploy Traefik Ingress
-      ansible.builtin.command:
-        cmd: kubectl apply -f {{ voting_app_dir }}/ingress.yaml
+    # ============================================================
+    # DEPLOY
+    # ============================================================
 
-    - name: Wait for Redis
-      ansible.builtin.command:
-        cmd: kubectl rollout status deployment/redis -n voting-app --timeout=120s
+    - name: Deploy Voting App
+      block:
 
-    - name: Wait for PostgreSQL
-      ansible.builtin.command:
-        cmd: kubectl rollout status deployment/db -n voting-app --timeout=120s
+        - name: Create voting-app namespace
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/namespace.yaml
 
-    - name: Wait for Vote
-      ansible.builtin.command:
-        cmd: kubectl rollout status deployment/vote -n voting-app --timeout=120s
+        - name: Apply PostgreSQL Secret
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/postgres-secret.yaml
 
-    - name: Wait for Worker
-      ansible.builtin.command:
-        cmd: kubectl rollout status deployment/worker -n voting-app --timeout=120s
+        - name: Deploy Redis
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/redis.yaml
 
-    - name: Wait for Result
-      ansible.builtin.command:
-        cmd: kubectl rollout status deployment/result -n voting-app --timeout=120s
+        - name: Deploy PostgreSQL
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/postgres.yaml
 
-    - name: Display Voting App Pods
-      ansible.builtin.command:
-        cmd: kubectl get pods -n voting-app -o wide
-      register: voting_pods
-      changed_when: false
+        - name: Deploy Vote application
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/vote.yaml
 
-    - name: Show Voting App Pods
-      ansible.builtin.debug:
-        var: voting_pods.stdout
+        - name: Deploy Worker
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/worker.yaml
+
+        - name: Deploy Result application
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/result.yaml
+
+        - name: Deploy Traefik Ingress
+          ansible.builtin.command:
+            cmd: kubectl apply -f {{ voting_app_dir }}/ingress.yaml
+
+        # --------------------------------------------------------
+        # Wait for deployments
+        # --------------------------------------------------------
+
+        - name: Wait for Redis
+          ansible.builtin.command:
+            cmd: kubectl rollout status deployment/redis -n voting-app --timeout=120s
+
+        - name: Wait for PostgreSQL
+          ansible.builtin.command:
+            cmd: kubectl rollout status deployment/db -n voting-app --timeout=120s
+
+        - name: Wait for Vote
+          ansible.builtin.command:
+            cmd: kubectl rollout status deployment/vote -n voting-app --timeout=120s
+
+        - name: Wait for Worker
+          ansible.builtin.command:
+            cmd: kubectl rollout status deployment/worker -n voting-app --timeout=120s
+
+        - name: Wait for Result
+          ansible.builtin.command:
+            cmd: kubectl rollout status deployment/result -n voting-app --timeout=120s
+
+        # --------------------------------------------------------
+        # Display application status
+        # --------------------------------------------------------
+
+        - name: Display Voting App Pods
+          ansible.builtin.command:
+            cmd: kubectl get pods -n voting-app -o wide
+          register: voting_pods
+          changed_when: false
+
+        - name: Show Voting App Pods
+          ansible.builtin.debug:
+            var: voting_pods.stdout
+
+      tags:
+        - deploy
