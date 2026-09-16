@@ -19,6 +19,9 @@ spec:
         app: result
 
     spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+
       containers:
         - name: result
           image: ghcr.io/shellback1998/voting-app-result:latest

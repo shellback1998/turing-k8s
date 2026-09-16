@@ -19,6 +19,9 @@ spec:
         app: worker
 
     spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+
       containers:
         - name: worker
           image: ghcr.io/shellback1998/voting-app-worker:latest
