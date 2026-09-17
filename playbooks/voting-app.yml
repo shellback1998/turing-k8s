@@ -6,10 +6,298 @@
   vars:
     voting_app_dir: /home/piadmin/k8s-lab/labs/06-voting-app
 
+    # Tailscale
+    tailscale_namespace: tailscale
+    tailscale_release: tailscale-operator
+    tailscale_values_file: /tmp/tailscale-operator-values.yaml
+    tailscale_kubeconfig: /etc/rancher/k3s/k3s.yaml
+
   tasks:
 
     # ============================================================
-    # DESTROY
+    # TAILSCALE OPERATOR DESTROY
+    # ============================================================
+
+    - name: Destroy Tailscale Operator
+      block:
+
+        - name: Uninstall Tailscale Operator
+          ansible.builtin.command:
+            cmd: >-
+              helm uninstall {{ tailscale_release }}
+              --namespace {{ tailscale_namespace }}
+          register: tailscale_uninstall
+          changed_when: tailscale_uninstall.rc == 0
+          failed_when:
+            - tailscale_uninstall.rc != 0
+            - "'release: not found' not in tailscale_uninstall.stderr"
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Delete Tailscale namespace
+          ansible.builtin.command:
+            cmd: >-
+              kubectl delete namespace {{ tailscale_namespace }}
+              --ignore-not-found=true
+          register: tailscale_namespace_delete
+          changed_when: tailscale_namespace_delete.rc == 0
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Wait for Tailscale namespace to disappear
+          ansible.builtin.command:
+            cmd: >-
+              kubectl get namespace {{ tailscale_namespace }}
+          register: tailscale_namespace_check
+          until: tailscale_namespace_check.rc != 0
+          retries: 30
+          delay: 2
+          changed_when: false
+          failed_when: false
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Confirm Tailscale Operator is gone
+          ansible.builtin.debug:
+            msg: "Tailscale Operator has been destroyed."
+
+      tags:
+        - tailscale-destroy
+
+
+    # ============================================================
+    # TAILSCALE OPERATOR DEPLOY
+    # ============================================================
+
+    - name: Deploy Tailscale Operator
+      block:
+
+        - name: Add Tailscale Helm repository
+          ansible.builtin.command:
+            cmd: >-
+              helm repo add tailscale
+              https://pkgs.tailscale.com/helmcharts
+          register: tailscale_repo_add
+          changed_when: "'has been added' in tailscale_repo_add.stdout"
+          failed_when:
+            - tailscale_repo_add.rc != 0
+            - "'already exists' not in tailscale_repo_add.stderr"
+
+        - name: Update Tailscale Helm repository
+          ansible.builtin.command:
+            cmd: helm repo update
+
+        - name: Create temporary Tailscale Helm values file
+          ansible.builtin.copy:
+            dest: "{{ tailscale_values_file }}"
+            mode: "0600"
+            content: |
+              oauth:
+                clientId: "{{ tailscale_client_id }}"
+                clientSecret: "{{ tailscale_client_secret }}"
+              operatorConfig:
+                defaultTags:
+                  - "tag:k8s-operator"
+          no_log: true
+
+        # --------------------------------------------------------
+        # Install/upgrade Operator
+        # --------------------------------------------------------
+
+        - name: Install Tailscale Operator
+          block:
+
+            - name: Install or upgrade Tailscale Operator
+              ansible.builtin.command:
+                cmd: >-
+                  helm upgrade
+                  --install
+                  {{ tailscale_release }}
+                  tailscale/tailscale-operator
+                  --namespace {{ tailscale_namespace }}
+                  --create-namespace
+                  --values {{ tailscale_values_file }}
+                  --wait
+              register: tailscale_install
+              changed_when: true
+              no_log: true
+              environment:
+                KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+          always:
+
+            - name: Remove temporary Tailscale Helm values file
+              ansible.builtin.file:
+                path: "{{ tailscale_values_file }}"
+                state: absent
+              no_log: true
+
+        # --------------------------------------------------------
+        # Verify Operator
+        # --------------------------------------------------------
+
+        - name: Wait for Tailscale Operator deployment
+          ansible.builtin.command:
+            cmd: >-
+              kubectl rollout status
+              deployment/operator
+              -n {{ tailscale_namespace }}
+              --timeout=180s
+          changed_when: false
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Display Tailscale Operator status
+          ansible.builtin.command:
+            cmd: >-
+              kubectl get pods
+              -n {{ tailscale_namespace }}
+              -o wide
+          register: tailscale_pods
+          changed_when: false
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Show Tailscale Operator pods
+          ansible.builtin.debug:
+            var: tailscale_pods.stdout
+
+      tags:
+        - tailscale
+
+
+    # ============================================================
+    # TAILSCALE VOTING APP INGRESS
+    # ============================================================
+
+    - name: Deploy Tailscale Voting App Ingress
+      block:
+
+        - name: Create Tailscale Vote ingress
+          ansible.builtin.command:
+            cmd: kubectl apply -f -
+            stdin: |
+              apiVersion: networking.k8s.io/v1
+              kind: Ingress
+              metadata:
+                name: vote-tailscale
+                namespace: voting-app
+              spec:
+                ingressClassName: tailscale
+                defaultBackend:
+                  service:
+                    name: vote
+                    port:
+                      number: 5000
+                tls:
+                  - hosts:
+                      - vote
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Create Tailscale Result ingress
+          ansible.builtin.command:
+            cmd: kubectl apply -f -
+            stdin: |
+              apiVersion: networking.k8s.io/v1
+              kind: Ingress
+              metadata:
+                name: result-tailscale
+                namespace: voting-app
+              spec:
+                ingressClassName: tailscale
+                defaultBackend:
+                  service:
+                    name: result
+                    port:
+                      number: 3000
+                tls:
+                  - hosts:
+                      - result
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        # --------------------------------------------------------
+        # Wait for Tailscale hostnames
+        # --------------------------------------------------------
+
+        - name: Wait for Vote Tailscale ingress address
+          ansible.builtin.command:
+            cmd: >-
+              kubectl get ingress vote-tailscale
+              -n voting-app
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+          register: vote_ingress_hostname
+          until:
+            - vote_ingress_hostname.rc == 0
+            - vote_ingress_hostname.stdout | length > 0
+          retries: 30
+          delay: 5
+          changed_when: false
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Wait for Result Tailscale ingress address
+          ansible.builtin.command:
+            cmd: >-
+              kubectl get ingress result-tailscale
+              -n voting-app
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+          register: result_ingress_hostname
+          until:
+            - result_ingress_hostname.rc == 0
+            - result_ingress_hostname.stdout | length > 0
+          retries: 30
+          delay: 5
+          changed_when: false
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Display Tailscale Voting App URLs
+          ansible.builtin.debug:
+            msg:
+              - "Vote URL: https://{{ vote_ingress_hostname.stdout }}"
+              - "Result URL: https://{{ result_ingress_hostname.stdout }}"
+
+      tags:
+        - tailscale
+
+
+    # ============================================================
+    # TAILSCALE VOTING APP INGRESS DESTROY
+    # ============================================================
+
+    - name: Destroy Tailscale Voting App Ingress
+      block:
+
+        - name: Delete Vote Tailscale ingress
+          ansible.builtin.command:
+            cmd: >-
+              kubectl delete ingress vote-tailscale
+              -n voting-app
+              --ignore-not-found=true
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Delete Result Tailscale ingress
+          ansible.builtin.command:
+            cmd: >-
+              kubectl delete ingress result-tailscale
+              -n voting-app
+              --ignore-not-found=true
+          environment:
+            KUBECONFIG: "{{ tailscale_kubeconfig }}"
+
+        - name: Confirm Tailscale Voting App ingress is gone
+          ansible.builtin.debug:
+            msg: "Tailscale Voting App ingress has been destroyed."
+
+      tags:
+        - tailscale-destroy
+
+
+    # ============================================================
+    # DESTROY VOTING APP
     # ============================================================
 
     - name: Destroy Voting App
@@ -38,7 +326,7 @@
 
 
     # ============================================================
-    # DEPLOY
+    # DEPLOY VOTING APP
     # ============================================================
 
     - name: Deploy Voting App
