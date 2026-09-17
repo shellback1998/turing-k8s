@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: visitor-app
+  namespace: visitor-counter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: visitor-app
+  template:
+    metadata:
+      labels:
+        app: visitor-app
+    spec:
+      containers:
+        - name: visitor-app
+          image: localhost/visitor-counter:1.0
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: visitor-app
+  namespace: visitor-counter
+spec:
+  selector:
+    app: visitor-app
+  ports:
+    - port: 80
+      targetPort: 5000

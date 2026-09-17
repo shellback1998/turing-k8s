@@ -6,3 +6,6 @@ voting-app-debug.txt
 # Temporary credential files
 *.vault.tmp
 *.secret.tmp
+
+# Local container images for visitor-counter lab
+labs/07-visitor-counter/*.tar
