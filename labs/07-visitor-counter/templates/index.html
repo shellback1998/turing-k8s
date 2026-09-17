@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Kubernetes Visitor Counter</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+</head>
+
+<body>
+
+    <main class="page">
+
+        <section class="card">
+
+            <div class="kubernetes-icon">☸</div>
+
+            <p class="eyebrow">TURING PI K3S</p>
+
+            <h1>Visitor Counter</h1>
+
+            <p class="subtitle">
+                A small application running on Kubernetes
+            </p>
+
+            <div class="counter-container">
+                <div class="counter">
+                    {{ visits }}
+                </div>
+
+                <div class="counter-label">
+                    TOTAL VISITORS
+                </div>
+            </div>
+
+            <a class="button" href="/">
+                Refresh Counter
+            </a>
+
+            <div class="status">
+                <span class="status-dot"></span>
+                <span>Running on K3s</span>
+            </div>
+
+        </section>
+
+        <footer>
+            Turing Pi Kubernetes Lab
+        </footer>
+
+    </main>
+
+</body>
+</html>

@@ -9,3 +9,6 @@ voting-app-debug.txt
 
 # Local container images for visitor-counter lab
 labs/07-visitor-counter/*.tar
+
+# Temporary visitor-counter build archives
+labs/07-visitor-counter/*.tar.gz

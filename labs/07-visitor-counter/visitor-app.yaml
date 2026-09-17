@@ -13,9 +13,11 @@ spec:
       labels:
         app: visitor-app
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: turing-node06
       containers:
         - name: visitor-app
-          image: localhost/visitor-counter:1.0
+          image: docker.io/library/visitor-counter:2.2
           imagePullPolicy: Never
           ports:
             - containerPort: 5000
