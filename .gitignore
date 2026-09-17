@@ -1,3 +1,4 @@
 # Kubernetes Secret files
 labs/03-secrets/secret.yaml
 labs/06-voting-app/postgres-secret.yaml
+voting-app-debug.txt
