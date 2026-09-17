@@ -1,0 +1,464 @@
+#!/bin/bash
+
+LAB="$HOME/k8s-lab"
+INVENTORY="$LAB/inventory/hosts.ini"
+VOTING="$LAB/playbooks/voting-app.yml"
+
+cmd="$(basename "$0")"
+
+main_help() {
+cat <<'HELP'
+TURING PI ANSIBLE COMMANDS
+==========================
+
+QUICK START - VOTING APP
+------------------------
+
+1. Check the playbook without making changes:
+     ansible-check
+
+2. Deploy the Voting App:
+     ansible-deploy
+
+3. Destroy / remove the Voting App:
+     ansible-cleanup
+
+4. Deploy it again:
+     ansible-deploy
+
+
+GENERAL COMMANDS
+----------------
+
+ansible-help
+  Show this complete help guide.
+
+ansible-status
+  Show the Ansible version and inventory overview.
+
+ansible-version
+  Show detailed Ansible version information.
+
+ansible-hosts
+  List all hosts currently managed by Ansible.
+
+ansible-inventory
+  Display the Ansible inventory as a graph.
+
+ansible-playbooks
+  List playbooks stored in ~/k8s-lab/playbooks.
+
+
+TESTING / DIAGNOSTICS
+---------------------
+
+ansible-ping
+  Test Ansible connectivity to all inventory hosts.
+
+ansible-facts
+  Gather detailed system information from inventory hosts.
+
+ansible-syntax
+  Check the Voting App playbook for YAML/Ansible syntax errors.
+
+ansible-check
+  Perform a dry run of the Voting App deployment.
+  Attempts to show what Ansible would change without deploying it.
+
+
+VOTING APP
+----------
+
+ansible-deploy
+  Deploy the Voting App to the K3s cluster.
+
+ansible-cleanup
+  Destroy/remove the Voting App from the K3s cluster.
+
+
+COMMAND-SPECIFIC HELP
+---------------------
+
+Every custom command supports --help.
+
+Examples:
+
+  ansible-deploy --help
+  ansible-cleanup --help
+  ansible-ping --help
+  ansible-check --help
+  ansible-inventory --help
+
+
+FILES USED
+----------
+
+Inventory:
+  ~/k8s-lab/inventory/hosts.ini
+
+Voting App playbook:
+  ~/k8s-lab/playbooks/voting-app.yml
+
+No passwords, Kubernetes Secrets, or K3s tokens are stored
+inside these helper commands.
+HELP
+}
+
+command_help() {
+case "$cmd" in
+
+ansible-deploy)
+cat <<'HELP'
+ANSIBLE-DEPLOY
+==============
+
+Purpose:
+  Deploy the Voting App to the K3s cluster using Ansible.
+
+Usage:
+  ansible-deploy
+
+Example:
+  ansible-deploy
+
+What it runs:
+  voting-app.yml --tags deploy
+
+You will be prompted for the Ansible BECOME/sudo password.
+
+Typical workflow:
+  ansible-check
+  ansible-deploy
+
+To destroy the Voting App:
+  ansible-cleanup
+
+Related:
+  ansible-check
+  ansible-cleanup
+  ansible-syntax
+HELP
+;;
+
+ansible-cleanup)
+cat <<'HELP'
+ANSIBLE-CLEANUP
+===============
+
+Purpose:
+  Destroy/remove the Voting App Kubernetes resources using Ansible.
+
+Usage:
+  ansible-cleanup
+
+Example:
+  ansible-cleanup
+
+What it runs:
+  voting-app.yml --tags cleanup
+
+You will be prompted for the Ansible BECOME/sudo password.
+
+To deploy the application again:
+  ansible-deploy
+
+Related:
+  ansible-deploy
+  ansible-check
+HELP
+;;
+
+ansible-check)
+cat <<'HELP'
+ANSIBLE-CHECK
+=============
+
+Purpose:
+  Perform an Ansible dry run of the Voting App deployment.
+
+Usage:
+  ansible-check
+
+Example:
+  ansible-check
+
+This uses Ansible --check mode.
+
+It is useful before:
+  ansible-deploy
+
+NOTE:
+  Check mode is a preview. Some modules/tasks may behave
+  differently in check mode or may not support it completely.
+
+Related:
+  ansible-syntax
+  ansible-deploy
+HELP
+;;
+
+ansible-syntax)
+cat <<'HELP'
+ANSIBLE-SYNTAX
+==============
+
+Purpose:
+  Check the Voting App playbook for syntax errors.
+
+Usage:
+  ansible-syntax
+
+Example:
+  ansible-syntax
+
+This does NOT deploy the application.
+
+Good workflow:
+  ansible-syntax
+  ansible-check
+  ansible-deploy
+HELP
+;;
+
+ansible-ping)
+cat <<'HELP'
+ANSIBLE-PING
+============
+
+Purpose:
+  Test whether Ansible can communicate with inventory hosts.
+
+Usage:
+  ansible-ping
+
+Example:
+  ansible-ping
+
+A successful host normally returns:
+  SUCCESS
+  pong
+
+This is an Ansible connectivity test, not a normal ICMP ping.
+
+Related:
+  ansible-hosts
+  ansible-inventory
+  ansible-status
+HELP
+;;
+
+ansible-status)
+cat <<'HELP'
+ANSIBLE-STATUS
+==============
+
+Purpose:
+  Give a quick overview of the Ansible environment.
+
+Usage:
+  ansible-status
+
+Example:
+  ansible-status
+
+Shows:
+  - Ansible version
+  - Inventory graph
+
+Related:
+  ansible-version
+  ansible-hosts
+  ansible-inventory
+HELP
+;;
+
+ansible-version)
+cat <<'HELP'
+ANSIBLE-VERSION
+===============
+
+Purpose:
+  Display installed Ansible version information.
+
+Usage:
+  ansible-version
+
+Example:
+  ansible-version
+HELP
+;;
+
+ansible-hosts)
+cat <<'HELP'
+ANSIBLE-HOSTS
+=============
+
+Purpose:
+  List hosts Ansible currently knows about from hosts.ini.
+
+Usage:
+  ansible-hosts
+
+Example:
+  ansible-hosts
+
+Related:
+  ansible-inventory
+  ansible-ping
+HELP
+;;
+
+ansible-inventory)
+cat <<'HELP'
+ANSIBLE-INVENTORY
+=================
+
+Purpose:
+  Display the Ansible inventory hierarchy as a graph.
+
+Usage:
+  ansible-inventory
+
+Example:
+  ansible-inventory
+
+Inventory file:
+  ~/k8s-lab/inventory/hosts.ini
+
+Related:
+  ansible-hosts
+  ansible-ping
+HELP
+;;
+
+ansible-facts)
+cat <<'HELP'
+ANSIBLE-FACTS
+=============
+
+Purpose:
+  Gather system facts from Ansible-managed hosts.
+
+Usage:
+  ansible-facts
+
+Example:
+  ansible-facts
+
+Facts can include:
+  - Hostname
+  - Operating system
+  - Architecture
+  - Network information
+  - Memory
+  - CPU information
+
+You may be prompted for the BECOME/sudo password.
+
+Related:
+  ansible-hosts
+  ansible-ping
+HELP
+;;
+
+ansible-playbooks)
+cat <<'HELP'
+ANSIBLE-PLAYBOOKS
+=================
+
+Purpose:
+  List the Ansible playbooks in the lab.
+
+Usage:
+  ansible-playbooks
+
+Example:
+  ansible-playbooks
+
+Playbook directory:
+  ~/k8s-lab/playbooks
+HELP
+;;
+
+ansible-help)
+  main_help
+;;
+
+*)
+  main_help
+;;
+esac
+}
+
+# Handle --help or -h for every helper command
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+    command_help
+    exit 0
+fi
+
+case "$cmd" in
+
+  ansible-help)
+    main_help
+    ;;
+
+  ansible-status)
+    echo "=== Ansible ==="
+    ansible --version | head -1
+    echo
+    echo "=== Inventory ==="
+    ansible-inventory -i "$INVENTORY" --graph
+    ;;
+
+  ansible-version)
+    ansible --version
+    ;;
+
+  ansible-hosts)
+    ansible all -i "$INVENTORY" --list-hosts
+    ;;
+
+  ansible-inventory)
+    ansible-inventory -i "$INVENTORY" --graph
+    ;;
+
+  ansible-playbooks)
+    find "$LAB/playbooks" -maxdepth 1 -type f \
+      \( -name "*.yml" -o -name "*.yaml" \) \
+      -printf "%f\n" | sort
+    ;;
+
+  ansible-ping)
+    ansible all -i "$INVENTORY" -m ping
+    ;;
+
+  ansible-facts)
+    ansible all -i "$INVENTORY" -m setup --ask-become-pass
+    ;;
+
+  ansible-syntax)
+    ansible-playbook -i "$INVENTORY" "$VOTING" --syntax-check
+    ;;
+
+  ansible-check)
+    ansible-playbook -i "$INVENTORY" "$VOTING" \
+      --tags deploy --check --ask-become-pass
+    ;;
+
+  ansible-deploy)
+    ansible-playbook -i "$INVENTORY" "$VOTING" \
+      --tags deploy --ask-become-pass
+    ;;
+
+  ansible-cleanup)
+    ansible-playbook -i "$INVENTORY" "$VOTING" \
+      --tags cleanup --ask-become-pass
+    ;;
+
+  *)
+    echo "Unknown Ansible helper command: $cmd"
+    echo
+    main_help
+    exit 1
+    ;;
+esac
