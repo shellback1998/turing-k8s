@@ -1,0 +1,14 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: visitor-counter
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - visitor-counter
+  defaultBackend:
+    service:
+      name: visitor-counter
+      port:
+        number: 5000

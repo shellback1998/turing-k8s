@@ -1,0 +1,40 @@
+---
+- name: Configure K3s registry access on workers
+  hosts: turing_workers
+  become: true
+  gather_facts: false
+
+  vars:
+    registry_host: "192.168.8.191:5000"
+    registry_endpoint: "http://192.168.8.191:5000"
+    registries_file: "/etc/rancher/k3s/registries.yaml"
+
+  tasks:
+
+    - name: Ensure K3s configuration directory exists
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure K3s containerd registry
+      ansible.builtin.copy:
+        dest: "{{ registries_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          mirrors:
+            "{{ registry_host }}":
+              endpoint:
+                - "{{ registry_endpoint }}"
+      notify: Restart K3s agent
+
+  handlers:
+
+    - name: Restart K3s agent
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: restarted
