@@ -1,0 +1,21 @@
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: voting-app-tailscale
+  namespace: voting-app
+  annotations:
+    tailscale.com/hostname: voting-app
+
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tailscale
+
+  selector:
+    app: vote
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5000

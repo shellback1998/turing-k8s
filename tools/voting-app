@@ -78,7 +78,137 @@ show_all() {
     show_status
 }
 
+
+deploy_app() {
+    local lab_dir="$HOME/k8s-lab/labs/06-voting-app"
+
+    echo
+    echo "Deploying Turing Pi Voting App"
+    echo "==============================="
+    echo
+
+    echo "[1/6] Creating namespace..."
+    sudo kubectl apply -f "$lab_dir/namespace.yaml"
+
+    echo
+    echo "[2/6] Creating PostgreSQL secret..."
+
+    read -rsp "PostgreSQL password: " postgres_password
+    echo
+
+    sudo kubectl create secret generic postgres-secret \
+        -n "$NAMESPACE" \
+        --from-literal=POSTGRES_USER=postgres \
+        --from-literal=POSTGRES_PASSWORD="$postgres_password" \
+        --from-literal=POSTGRES_DB=postgres \
+        --dry-run=client -o yaml |
+        sudo kubectl apply -f -
+
+    unset postgres_password
+
+    echo
+    echo "[3/6] Deploying database and Redis..."
+    sudo kubectl apply \
+        -f "$lab_dir/postgres.yaml" \
+        -f "$lab_dir/redis.yaml"
+
+    echo
+    echo "Waiting for database..."
+    sudo kubectl rollout status deployment/db \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    echo "Waiting for Redis..."
+    sudo kubectl rollout status deployment/redis \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    echo
+    echo "[4/6] Deploying application..."
+    sudo kubectl apply \
+        -f "$lab_dir/vote.yaml" \
+        -f "$lab_dir/result.yaml" \
+        -f "$lab_dir/worker.yaml"
+
+    sudo kubectl rollout status deployment/vote \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    sudo kubectl rollout status deployment/result \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    sudo kubectl rollout status deployment/worker \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    echo
+    echo "[5/6] Creating Tailscale service..."
+    sudo kubectl apply -f "$lab_dir/tailscale.yaml"
+
+    echo
+    echo "[6/6] Waiting for Tailscale address..."
+
+    local host=""
+
+    for _ in {1..60}; do
+        host=$(sudo kubectl get svc voting-app-tailscale \
+            -n "$NAMESPACE" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+            2>/dev/null || true)
+
+        [[ -n "$host" ]] && break
+        sleep 2
+    done
+
+    echo
+    echo "Voting App deployment complete."
+    echo
+
+    if [[ -n "$host" ]]; then
+        echo "Open:"
+        echo "  http://voting-app"
+        echo
+        echo "Tailscale hostname:"
+        echo "  http://${host}"
+    else
+        echo "Tailscale is still provisioning the address."
+        echo "Run: voting-app status"
+    fi
+
+    echo
+}
+
+destroy_app() {
+    echo
+    echo "Destroying Voting App"
+    echo "====================="
+    echo
+
+    read -rp "Delete the entire voting-app namespace? [y/N] " answer
+
+    case "$answer" in
+        y|Y|yes|YES)
+            sudo kubectl delete namespace "$NAMESPACE" --ignore-not-found
+            echo
+            echo "Voting App destroyed."
+            ;;
+        *)
+            echo "Cancelled."
+            ;;
+    esac
+}
+
 case "${1:-}" in
+
+    deploy)
+        deploy_app
+        ;;
+
+    destroy)
+        destroy_app
+        ;;
+
 install)
         echo "Installing voting-app..."
         sudo install -m 755 "$0" /usr/local/bin/voting-app
