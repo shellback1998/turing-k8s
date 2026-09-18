@@ -1,0 +1,52 @@
+---
+- name: Configure local Docker registry access
+  hosts: turing_workers
+  become: true
+  gather_facts: false
+
+  vars:
+    registry_address: "192.168.8.191:5000"
+
+  tasks:
+
+    - name: Ensure Docker configuration directory exists
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure Docker insecure registry
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {
+            "insecure-registries": [
+              "{{ registry_address }}"
+            ]
+          }
+      notify: Restart Docker
+
+    - name: Verify Docker service
+      ansible.builtin.command:
+        cmd: systemctl is-active docker
+      register: docker_status
+      changed_when: false
+
+    - name: Display registry configuration
+      ansible.builtin.debug:
+        msg:
+          - "Worker: {{ inventory_hostname }}"
+          - "Registry: {{ registry_address }}"
+          - "Docker: {{ docker_status.stdout }}"
+
+  handlers:
+
+    - name: Restart Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
