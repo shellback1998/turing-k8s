@@ -1,0 +1,76 @@
+---
+- name: Manage Turing Pi Visitor Counter on K3s
+  hosts: k8s_manager
+  become: true
+
+  vars:
+    visitor_counter_dir: /home/piadmin/k8s-lab/labs/07-visitor-counter
+    visitor_counter_kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+  tasks:
+
+    # ============================================================
+    # REDIS
+    # ============================================================
+
+    - name: Deploy Redis
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ visitor_counter_dir }}/redis.yml
+      environment:
+        KUBECONFIG: "{{ visitor_counter_kubeconfig }}"
+
+    - name: Wait for Redis
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status deployment/redis
+          --timeout=120s
+      environment:
+        KUBECONFIG: "{{ visitor_counter_kubeconfig }}"
+      changed_when: false
+
+    # ============================================================
+    # VISITOR COUNTER
+    # ============================================================
+
+    - name: Deploy Visitor Counter
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ visitor_counter_dir }}/visitor-counter.yml
+      environment:
+        KUBECONFIG: "{{ visitor_counter_kubeconfig }}"
+
+    - name: Wait for Visitor Counter rollout
+      ansible.builtin.command:
+        cmd: >-
+          kubectl rollout status deployment/visitor-counter
+          --timeout=180s
+      environment:
+        KUBECONFIG: "{{ visitor_counter_kubeconfig }}"
+      changed_when: false
+
+    # ============================================================
+    # VERIFY
+    # ============================================================
+
+    - name: Get Visitor Counter pods
+      ansible.builtin.command:
+        cmd: kubectl get pods -l app=visitor-counter -o wide
+      register: visitor_counter_pods
+      environment:
+        KUBECONFIG: "{{ visitor_counter_kubeconfig }}"
+      changed_when: false
+
+    - name: Display Visitor Counter pods
+      ansible.builtin.debug:
+        var: visitor_counter_pods.stdout
+
+    - name: Get Visitor Counter service
+      ansible.builtin.command:
+        cmd: kubectl get svc visitor-counter
+      register: visitor_counter_service
+      environment:
+        KUBECONFIG: "{{ visitor_counter_kubeconfig }}"
+      changed_when: false
+
+    - name: Display Visitor Counter service
+      ansible.builtin.debug:
+        var: visitor_counter_service.stdout
