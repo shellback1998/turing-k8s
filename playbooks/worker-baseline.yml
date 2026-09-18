@@ -5,6 +5,16 @@
   gather_facts: true
 
   tasks:
+    - name: Configure passwordless sudo for piadmin
+      become: true
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/99-piadmin
+        content: |
+          piadmin ALL=(ALL) NOPASSWD: ALL
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "/usr/sbin/visudo -cf %s"
 
     - name: Ensure required packages are installed
       ansible.builtin.apt:

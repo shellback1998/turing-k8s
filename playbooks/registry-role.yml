@@ -1,0 +1,98 @@
+---
+- name: Configure Turing Pi registry node
+  hosts: turing_registry
+  become: true
+  gather_facts: true
+
+  vars:
+    registry_name: "local-registry"
+    registry_image: "registry:2"
+    registry_port: "5000"
+    registry_host: "192.168.8.191"
+    storage_mount: "/mnt/turing-storage"
+    registry_data: "/mnt/turing-storage/images/registry"
+    registry_container_path: "/var/lib/registry"
+
+  tasks:
+
+    - name: Verify Turing storage is mounted
+      ansible.builtin.command:
+        cmd: findmnt {{ storage_mount }}
+      register: storage_mount_status
+      changed_when: false
+      failed_when: storage_mount_status.rc != 0
+
+    - name: Ensure registry data directory exists
+      ansible.builtin.file:
+        path: "{{ registry_data }}"
+        state: directory
+        owner: piadmin
+        group: piadmin
+        mode: "0775"
+
+    - name: Verify registry image exists
+      ansible.builtin.command:
+        cmd: docker image inspect {{ registry_image }}
+      register: registry_image_status
+      changed_when: false
+      failed_when: false
+
+    - name: Pull registry image when missing
+      ansible.builtin.command:
+        cmd: docker pull {{ registry_image }}
+      when: registry_image_status.rc != 0
+
+    - name: Check existing registry container
+      ansible.builtin.command:
+        cmd: docker inspect {{ registry_name }}
+      register: registry_container
+      changed_when: false
+      failed_when: false
+
+    - name: Create registry container when missing
+      ansible.builtin.command:
+        cmd: >-
+          docker run -d
+          --name {{ registry_name }}
+          --restart unless-stopped
+          -p {{ registry_port }}:5000
+          -v {{ registry_data }}:{{ registry_container_path }}
+          {{ registry_image }}
+      when: registry_container.rc != 0
+
+    - name: Ensure registry container is running
+      ansible.builtin.command:
+        cmd: docker start {{ registry_name }}
+      register: registry_start
+      changed_when: registry_start.rc == 0
+      failed_when: false
+      when: registry_container.rc != 0
+
+    - name: Verify registry endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ registry_port }}/v2/"
+        method: GET
+        status_code: 200
+      register: registry_endpoint
+      changed_when: false
+
+    - name: Get registry catalog
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ registry_port }}/v2/_catalog"
+        method: GET
+        return_content: true
+        status_code: 200
+      register: registry_catalog
+      changed_when: false
+
+    - name: Display registry role status
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Registry Node: {{ inventory_hostname }}"
+          - "Storage: {{ storage_mount_status.stdout }}"
+          - "Registry image: {{ registry_image }}"
+          - "Registry container: {{ registry_name }}"
+          - "Registry endpoint: reachable"
+          - "Repositories: {{ registry_catalog.json.repositories | default([]) }}"
+          - "========================================"
