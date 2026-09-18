@@ -1,0 +1,47 @@
+---
+- name: Configure common Turing Pi worker baseline
+  hosts: turing_workers
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Ensure required packages are installed
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+          - rsync
+        state: present
+        update_cache: true
+
+    - name: Ensure Docker service is enabled and started
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure K3s agent service is enabled and started
+      ansible.builtin.systemd:
+        name: k3s-agent
+        enabled: true
+        state: started
+
+    - name: Verify Docker service
+      ansible.builtin.command:
+        cmd: systemctl is-active docker
+      register: docker_status
+      changed_when: false
+
+    - name: Verify K3s agent service
+      ansible.builtin.command:
+        cmd: systemctl is-active k3s-agent
+      register: k3s_status
+      changed_when: false
+
+    - name: Display worker baseline status
+      ansible.builtin.debug:
+        msg:
+          - "Worker: {{ ansible_facts['hostname'] }}"
+          - "Docker: {{ docker_status.stdout }}"
+          - "K3s agent: {{ k3s_status.stdout }}"
