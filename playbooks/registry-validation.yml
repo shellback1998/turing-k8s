@@ -1,0 +1,78 @@
+---
+- name: Validate Turing Pi registry access
+  hosts: turing_workers
+  gather_facts: false
+
+  vars:
+    registry_address: "192.168.8.191:5000"
+    image_name: "visitor-counter"
+    image_tag: "2.2"
+
+  tasks:
+
+    - name: Check Docker service
+      ansible.builtin.command:
+        cmd: systemctl is-active docker
+      register: docker_status
+      changed_when: false
+      failed_when: docker_status.rc != 0
+
+    - name: Check Docker registry configuration
+      ansible.builtin.stat:
+        path: /etc/docker/daemon.json
+      register: docker_config
+
+    - name: Read Docker registry configuration
+      ansible.builtin.slurp:
+        src: /etc/docker/daemon.json
+      register: docker_config_contents
+      when: docker_config.stat.exists
+
+    - name: Verify registry configuration
+      ansible.builtin.assert:
+        that:
+          - docker_config.stat.exists
+          - registry_address in (docker_config_contents.content | b64decode)
+        fail_msg: >-
+          Docker registry configuration is missing or does not contain
+          {{ registry_address }}.
+        success_msg: "Docker registry configuration is correct."
+
+    - name: Check registry endpoint
+      ansible.builtin.uri:
+        url: "http://{{ registry_address }}/v2/"
+        method: GET
+        status_code: 200
+      register: registry_endpoint
+      changed_when: false
+
+    - name: Check visitor-counter repository
+      ansible.builtin.uri:
+        url: "http://{{ registry_address }}/v2/{{ image_name }}/tags/list"
+        method: GET
+        return_content: true
+        status_code: 200
+      register: registry_tags
+      changed_when: false
+
+    - name: Verify required image tag exists
+      ansible.builtin.assert:
+        that:
+          - image_tag in (registry_tags.json.tags | default([]))
+        fail_msg: >-
+          {{ image_name }}:{{ image_tag }} was not found in
+          {{ registry_address }}.
+        success_msg: >-
+          {{ image_name }}:{{ image_tag }} is available in the registry.
+
+    - name: Display registry validation result
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Worker: {{ inventory_hostname }}"
+          - "Docker: {{ docker_status.stdout }}"
+          - "Registry: {{ registry_address }}"
+          - "Registry endpoint: reachable"
+          - "Image: {{ image_name }}:{{ image_tag }}"
+          - "Image available: yes"
+          - "========================================"
