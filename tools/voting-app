@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+NAMESPACE="voting-app"
+
+# ------------------------------------------------------------
+# Turing Pi Voting App
+# Dynamically discovers Kubernetes and Tailscale information.
+# ------------------------------------------------------------
+
+get_ingress_hostname() {
+    local ingress="$1"
+
+    sudo kubectl get ingress "$ingress" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+        2>/dev/null || true
+}
+
+show_urls() {
+    local vote_host
+    local result_host
+
+    vote_host=$(get_ingress_hostname "vote-tailscale")
+    result_host=$(get_ingress_hostname "result-tailscale")
+
+    echo
+    echo "Voting App URLs"
+    echo "==============="
+    echo
+
+    if [[ -n "$vote_host" ]]; then
+        echo "Vote:    https://${vote_host}"
+    else
+        echo "Vote:    Tailscale address not found"
+    fi
+
+    if [[ -n "$result_host" ]]; then
+        echo "Results: https://${result_host}"
+    else
+        echo "Results: Tailscale address not found"
+    fi
+
+    echo
+}
+
+show_status() {
+    echo
+    echo "Voting App Status"
+    echo "================="
+    echo
+
+    sudo kubectl get deployments \
+        -n "$NAMESPACE" \
+        -o custom-columns='COMPONENT:.metadata.name,READY:.status.readyReplicas,DESIRED:.spec.replicas,AVAILABLE:.status.availableReplicas'
+
+    echo
+}
+
+show_pods() {
+    echo
+    echo "Voting App Pods"
+    echo "==============="
+    echo
+
+    sudo kubectl get pods -n "$NAMESPACE" -o wide
+
+    echo
+}
+
+show_all() {
+    echo
+    echo "Turing Pi Voting App"
+    echo "===================="
+
+    show_urls
+    show_status
+}
+
+case "${1:-}" in
+install)
+        echo "Installing voting-app..."
+        sudo install -m 755 "$0" /usr/local/bin/voting-app
+        echo "Installed: /usr/local/bin/voting-app"
+        echo
+        /usr/local/bin/voting-app
+        ;;
+
+    status)
+        show_status
+        ;;
+
+    urls)
+        show_urls
+        ;;
+
+    pods)
+        show_pods
+        ;;
+
+    logs)
+        if [[ -z "${2:-}" ]]; then
+            echo "Usage: voting-app logs <component>"
+            echo "Example: voting-app logs vote"
+            exit 1
+        fi
+
+        sudo kubectl logs \
+            -n "$NAMESPACE" \
+            deployment/"$2" \
+            --tail=50
+        ;;
+
+    help|-h|--help)
+        echo
+        echo "Usage: voting-app [command]"
+        echo
+        echo "Commands:"
+        echo "  install            Install/update voting-app globally"
+        echo "  status             Show deployment health"
+        echo "  urls               Show Tailscale URLs"
+        echo "  pods               Show Kubernetes pods"
+        echo "  logs <component>   Show component logs"
+        echo "  help               Show this help"
+        echo
+        ;;
+
+    "")
+        show_all
+        ;;
+
+    *)
+        echo "Unknown command: $1"
+        echo "Run: voting-app help"
+        exit 1
+        ;;
+
+esac
