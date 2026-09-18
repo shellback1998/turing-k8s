@@ -1,0 +1,55 @@
+---
+- name: Discover Turing Pi worker baseline
+  hosts: turing_workers
+  gather_facts: true
+  become: true
+
+  tasks:
+
+    - name: Get Docker version
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Get K3s version
+      ansible.builtin.command:
+        cmd: k3s --version
+      register: k3s_version
+      changed_when: false
+
+    - name: Check Docker service
+      ansible.builtin.command:
+        cmd: systemctl is-active docker
+      register: docker_service
+      changed_when: false
+
+    - name: Check K3s agent service
+      ansible.builtin.command:
+        cmd: systemctl is-active k3s-agent
+      register: k3s_service
+      changed_when: false
+
+    - name: Check Turing storage
+      ansible.builtin.command:
+        cmd: findmnt -n -o SOURCE,TARGET,FSTYPE /mnt/turing-storage
+      register: turing_storage
+      changed_when: false
+      failed_when: false
+
+    - name: Display worker baseline
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Worker: {{ inventory_hostname }}"
+          - "Hostname: {{ ansible_facts['hostname'] }}"
+          - "OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+          - "Architecture: {{ ansible_facts['architecture'] }}"
+          - "Python: {{ ansible_facts['python']['version']['major'] }}.{{ ansible_facts['python']['version']['minor'] }}.{{ ansible_facts['python']['version']['micro'] }}"
+          - "Memory: {{ ansible_facts['memtotal_mb'] }} MB"
+          - "Docker: {{ docker_version.stdout }}"
+          - "Docker service: {{ docker_service.stdout }}"
+          - "K3s: {{ k3s_version.stdout }}"
+          - "K3s agent service: {{ k3s_service.stdout }}"
+          - "Turing storage: {{ turing_storage.stdout | default('Not mounted') }}"
+          - "========================================"
