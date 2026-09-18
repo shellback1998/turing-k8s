@@ -1,0 +1,80 @@
+---
+- name: Validate Turing Pi worker compliance
+  hosts: turing_workers
+  gather_facts: true
+
+  vars:
+    expected_python: "3.13"
+    expected_docker_service: "docker"
+    expected_k3s_service: "k3s-agent"
+
+  tasks:
+
+    - name: Verify passwordless sudo
+      ansible.builtin.command:
+        cmd: sudo -n true
+      register: sudo_check
+      changed_when: false
+      failed_when: sudo_check.rc != 0
+
+    - name: Verify Docker service
+      ansible.builtin.command:
+        cmd: systemctl is-active docker
+      register: docker_check
+      changed_when: false
+      failed_when: docker_check.rc != 0
+
+    - name: Verify K3s agent service
+      ansible.builtin.command:
+        cmd: systemctl is-active k3s-agent
+      register: k3s_check
+      changed_when: false
+      failed_when: k3s_check.rc != 0
+
+    - name: Verify Python version
+      ansible.builtin.command:
+        cmd: python3 --version
+      register: python_check
+      changed_when: false
+      failed_when: false
+
+    - name: Verify Docker installation
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_version
+      changed_when: false
+      failed_when: docker_version.rc != 0
+
+    - name: Verify K3s installation
+      ansible.builtin.command:
+        cmd: k3s --version
+      register: k3s_version
+      changed_when: false
+      failed_when: k3s_version.rc != 0
+
+    - name: Display worker compliance
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "Worker: {{ inventory_hostname }}"
+          - "OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+          - "Architecture: {{ ansible_facts['architecture'] }}"
+          - "Python: {{ python_check.stdout }}"
+          - "Docker: {{ docker_version.stdout }}"
+          - "Docker service: {{ docker_check.stdout }}"
+          - "K3s: {{ k3s_version.stdout }}"
+          - "K3s agent service: {{ k3s_check.stdout }}"
+          - "Passwordless sudo: PASS"
+          - "========================================"
+
+    - name: Assert worker compliance
+      ansible.builtin.assert:
+        that:
+          - sudo_check.rc == 0
+          - docker_check.stdout == "active"
+          - k3s_check.stdout == "active"
+          - python_check.rc == 0
+          - docker_version.rc == 0
+          - k3s_version.rc == 0
+        fail_msg: "Worker {{ inventory_hostname }} failed one or more compliance checks."
+        success_msg: "Worker {{ inventory_hostname }} passed all compliance checks."
