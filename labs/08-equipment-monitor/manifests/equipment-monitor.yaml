@@ -17,10 +17,13 @@ spec:
         kubernetes.io/arch: arm64
       containers:
         - name: equipment-monitor
-          image: 192.168.8.191:5000/equipment-monitor:1.0
+          image: 192.168.8.191:5000/equipment-monitor:1.1
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
+          env:
+            - name: APP_VERSION
+              value: "1.1"
           envFrom:
             - configMapRef:
                 name: equipment-monitor-config
@@ -37,12 +40,16 @@ spec:
               port: 5000
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /health
               port: 5000
             initialDelaySeconds: 10
             periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service

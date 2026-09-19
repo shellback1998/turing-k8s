@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.0"
+VERSION="1.1"
 
 LAB_DIR="$HOME/k8s-lab/labs/08-equipment-monitor"
 MANIFEST_DIR="$LAB_DIR/manifests"
@@ -184,6 +184,274 @@ destroy_app() {
 
     echo
     echo "✓ Equipment Monitor removed"
+}
+
+verify_release() {
+    local expected="$1"
+
+    echo "Verifying deployed release..."
+    echo
+
+    local image
+    local version
+    local actual_tag
+
+    image=$($KUBECTL get deployment "$APP" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[0].image}') || return 1
+
+    version=$($KUBECTL get deployment "$APP" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="APP_VERSION")].value}') || return 1
+
+    actual_tag="${image##*:}"
+
+    echo "Expected release: $expected"
+    echo "Image tag:        $actual_tag"
+    echo "APP_VERSION:      $version"
+    echo
+
+    if [[ "$actual_tag" != "$expected" ]]; then
+        echo "✗ RELEASE VERIFICATION FAILED"
+        echo "  Expected image tag $expected but Kubernetes reports $actual_tag"
+        return 1
+    fi
+
+    if [[ "$version" != "$expected" ]]; then
+        echo "✗ RELEASE VERIFICATION FAILED"
+        echo "  Expected APP_VERSION $expected but Kubernetes reports $version"
+        return 1
+    fi
+
+    echo "✓ Kubernetes release metadata matches $expected"
+}
+
+upgrade_app() {
+    local tag="${1:-}"
+
+    if [[ -z "$tag" ]]; then
+        echo "Usage: equipment-monitor upgrade <TAG>"
+        echo "Example: equipment-monitor upgrade 1.1"
+        return 1
+    fi
+
+    if [[ ! "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "✗ Invalid image tag: $tag"
+        return 1
+    fi
+
+    local registry="192.168.8.191:5000"
+    local image="$registry/equipment-monitor:$tag"
+
+    echo "Equipment Monitor upgrade"
+    echo "========================="
+    echo
+    echo "Target release: $tag"
+    echo "Target image:   $image"
+    echo
+
+    echo "Checking registry..."
+
+    tags=$(curl -fsS         "http://$registry/v2/equipment-monitor/tags/list") || {
+        echo "✗ Unable to query container registry"
+        return 1
+    }
+
+    if ! python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if sys.argv[1] in (data.get("tags") or []) else 1)' "$tag" <<< "$tags"; then
+        echo "✗ Image tag '$tag' was not found in the registry"
+        echo "  Build it first with:"
+        echo "  equipment-monitor build $tag"
+        return 1
+    fi
+
+    echo "✓ Image tag $tag exists in registry"
+
+    echo
+    echo "Current release:"
+    show_image
+
+    echo
+    echo "Starting rolling upgrade..."
+
+    local patch
+
+    patch=$(python3 - "$APP" "$image" "$tag" <<'PYJSON'
+import json
+import sys
+
+app, image, tag = sys.argv[1:4]
+
+print(json.dumps({
+    "metadata": {
+        "annotations": {
+            "kubernetes.io/change-cause":
+                f"Upgrade Equipment Monitor to {tag}"
+        }
+    },
+    "spec": {
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": app,
+                        "image": image,
+                        "env": [
+                            {
+                                "name": "APP_VERSION",
+                                "value": tag
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+}))
+PYJSON
+    ) || return 1
+
+    $KUBECTL patch deployment "$APP" \
+        -n "$NAMESPACE" \
+        --type=strategic \
+        -p "$patch" || return 1
+
+    echo
+    echo "Waiting for rollout..."
+    if ! $KUBECTL rollout status deployment/"$APP" \
+        -n "$NAMESPACE" --timeout=120s; then
+        echo
+        echo "✗ Rollout did not complete successfully"
+        echo "  Inspect with:"
+        echo "  equipment-monitor pods"
+        echo "  equipment-monitor events"
+        return 1
+    fi
+
+    echo
+    if ! verify_release "$tag"; then
+        echo
+        echo "✗ Upgrade cannot be considered successful"
+        return 1
+    fi
+
+    echo
+    if ! verify_app; then
+        echo
+        echo "✗ Release $tag failed application verification"
+        return 1
+    fi
+
+    echo
+    echo "✓ Upgrade to $tag completed and verified"
+}
+
+rollback_app() {
+    local revision="${1:-}"
+
+    if [[ -z "$revision" ]]; then
+        echo "Usage: equipment-monitor rollback <REVISION>"
+        echo
+        echo "Available revisions:"
+        $KUBECTL rollout history deployment/"$APP" -n "$NAMESPACE"
+        return 1
+    fi
+
+    if [[ ! "$revision" =~ ^[0-9]+$ ]]; then
+        echo "✗ Revision must be a positive integer"
+        return 1
+    fi
+
+    echo "Equipment Monitor rollback"
+    echo "=========================="
+    echo
+    echo "Target revision: $revision"
+    echo
+
+    echo "Revision details:"
+    if ! $KUBECTL rollout history deployment/"$APP" \
+        -n "$NAMESPACE" \
+        --revision="$revision"; then
+        echo
+        echo "✗ Revision $revision does not exist"
+        return 1
+    fi
+
+    echo
+    read -r -p "Type ROLLBACK to continue: " confirmation
+
+    if [[ "$confirmation" != "ROLLBACK" ]]; then
+        echo "Rollback cancelled."
+        return 1
+    fi
+
+    echo
+    echo "Starting rollback..."
+
+    if ! $KUBECTL rollout undo deployment/"$APP" \
+        -n "$NAMESPACE" \
+        --to-revision="$revision"; then
+        echo "✗ Rollback command failed"
+        return 1
+    fi
+
+    echo
+    echo "Waiting for rollback..."
+    if ! $KUBECTL rollout status deployment/"$APP" \
+        -n "$NAMESPACE" \
+        --timeout=120s; then
+        echo
+        echo "✗ Rollback did not complete successfully"
+        return 1
+    fi
+
+    echo
+    echo "✓ Kubernetes rollback completed"
+    echo
+    show_image
+
+    echo
+    echo "Running application verification..."
+    verify_app
+}
+
+show_history() {
+    echo "Equipment Monitor rollout history"
+    echo "================================="
+    echo
+
+    $KUBECTL rollout history deployment/"$APP" -n "$NAMESPACE"
+}
+
+show_image() {
+    local image
+    local version
+
+    echo "Equipment Monitor release"
+    echo "========================="
+    echo
+
+    image=$($KUBECTL get deployment "$APP"         -n "$NAMESPACE"         -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null) || {
+        echo "✗ Unable to read Equipment Monitor deployment"
+        return 1
+    }
+
+    version=$($KUBECTL get deployment "$APP"         -n "$NAMESPACE"         -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="APP_VERSION")].value}'         2>/dev/null)
+
+    echo "Image:"
+    echo "  $image"
+    echo
+
+    echo "Image tag:"
+    echo "  ${image##*:}"
+    echo
+
+    if [[ -n "$version" ]]; then
+        echo "APP_VERSION:"
+        echo "  $version"
+    else
+        echo "APP_VERSION:"
+        echo "  not defined in current deployment"
+    fi
 }
 
 show_status() {
@@ -751,6 +1019,10 @@ COMMANDS
   urls                        Show Tailscale URLs
   health                      Check component health
   verify                      Perform end-to-end health verification
+  image                       Show currently deployed release
+  upgrade TAG                 Rolling upgrade to container image TAG
+  history                     Show Kubernetes rollout history
+  rollback REVISION           Roll back to a specific revision
   config                      Show effective configuration
   describe                    Describe major Kubernetes resources
   events                      Show recent namespace events
@@ -772,6 +1044,10 @@ EXAMPLES
   equipment-monitor scale 4
   equipment-monitor health
   equipment-monitor verify
+  equipment-monitor image
+  equipment-monitor upgrade 1.1
+  equipment-monitor history
+  equipment-monitor rollback 5
   equipment-monitor logs redis
   equipment-monitor explain node-selector
   equipment-monitor urls
@@ -809,6 +1085,18 @@ case "$command" in
         ;;
     destroy)
         destroy_app
+        ;;
+    upgrade)
+        upgrade_app "$@"
+        ;;
+    rollback)
+        rollback_app "$@"
+        ;;
+    history)
+        show_history
+        ;;
+    image)
+        show_image
         ;;
     status)
         show_status
