@@ -1,0 +1,864 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="1.0"
+
+LAB_DIR="$HOME/k8s-lab/labs/08-equipment-monitor"
+MANIFEST_DIR="$LAB_DIR/manifests"
+BUILD_SCRIPT="$LAB_DIR/build.sh"
+
+NAMESPACE="equipment-monitor"
+APP="equipment-monitor"
+REDIS="equipment-redis"
+TAILSCALE_SERVICE="equipment-monitor-tailscale"
+
+DEFAULT_REPLICAS=3
+MIN_REPLICAS=1
+MAX_REPLICAS=20
+DEFAULT_IMAGE_TAG="1.0"
+
+KUBECTL="sudo kubectl"
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+validate_replicas() {
+    local n="${1:-}"
+
+    [[ "$n" =~ ^[0-9]+$ ]] ||
+        die "Replica count must be an integer."
+
+    (( n >= MIN_REPLICAS && n <= MAX_REPLICAS )) ||
+        die "Replica count must be between $MIN_REPLICAS and $MAX_REPLICAS."
+}
+
+require_file() {
+    [[ -f "$1" ]] || die "Required file not found: $1"
+}
+
+check_prerequisites() {
+    echo "Equipment Monitor prerequisite check"
+    echo "===================================="
+    echo
+
+    local failures=0
+
+    if command -v kubectl >/dev/null 2>&1; then
+        echo "✓ kubectl installed"
+    else
+        echo "✗ kubectl not installed"
+        failures=$((failures + 1))
+    fi
+
+    if $KUBECTL cluster-info >/dev/null 2>&1; then
+        echo "✓ Kubernetes cluster reachable"
+    else
+        echo "✗ Kubernetes cluster unavailable"
+        failures=$((failures + 1))
+    fi
+
+    if curl -fsS --connect-timeout 5 \
+        http://192.168.8.191:5000/v2/ >/dev/null 2>&1; then
+        echo "✓ Container registry reachable"
+    else
+        echo "✗ Container registry unavailable"
+        failures=$((failures + 1))
+    fi
+
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+        piadmin@192.168.8.191 \
+        'docker --version >/dev/null && test "$(uname -m)" = "aarch64"' \
+        >/dev/null 2>&1; then
+        echo "✓ ARM64 build node ready"
+    else
+        echo "✗ ARM64 build node unavailable"
+        failures=$((failures + 1))
+    fi
+
+    for file in \
+        "$MANIFEST_DIR/configmap.yaml" \
+        "$MANIFEST_DIR/redis.yaml" \
+        "$MANIFEST_DIR/equipment-monitor.yaml" \
+        "$MANIFEST_DIR/tailscale.yaml"
+    do
+        if [[ -f "$file" ]]; then
+            echo "✓ $(basename "$file")"
+        else
+            echo "✗ Missing $(basename "$file")"
+            failures=$((failures + 1))
+        fi
+    done
+
+    echo
+
+    if (( failures == 0 )); then
+        echo "Overall: READY"
+    else
+        echo "Overall: $failures prerequisite check(s) failed"
+        return 1
+    fi
+}
+
+build_app() {
+    local tag="${1:-$DEFAULT_IMAGE_TAG}"
+
+    require_file "$BUILD_SCRIPT"
+
+    echo "Building Equipment Monitor image $tag..."
+    "$BUILD_SCRIPT" "$tag"
+}
+
+deploy_app() {
+    local replicas="$DEFAULT_REPLICAS"
+
+    while (( $# > 0 )); do
+        case "$1" in
+            --replicas|-r)
+                [[ $# -ge 2 ]] || die "$1 requires a replica count."
+                replicas="$2"
+                shift 2
+                ;;
+            *)
+                die "Unknown deploy option: $1"
+                ;;
+        esac
+    done
+
+    validate_replicas "$replicas"
+
+    echo "========================================"
+    echo " Equipment Monitor Deployment"
+    echo "========================================"
+    echo
+    echo "Replicas: $replicas"
+    echo
+
+    echo "[1/6] Creating namespace..."
+    $KUBECTL create namespace "$NAMESPACE" \
+        --dry-run=client -o yaml | $KUBECTL apply -f -
+
+    echo
+    echo "[2/6] Applying configuration..."
+    $KUBECTL apply -f "$MANIFEST_DIR/configmap.yaml"
+
+    echo
+    echo "[3/6] Deploying Redis..."
+    $KUBECTL apply -f "$MANIFEST_DIR/redis.yaml"
+    $KUBECTL rollout status deployment/"$REDIS" \
+        -n "$NAMESPACE" --timeout=120s
+
+    echo
+    echo "[4/6] Deploying Equipment Monitor..."
+    $KUBECTL apply -f "$MANIFEST_DIR/equipment-monitor.yaml"
+    $KUBECTL scale deployment/"$APP" \
+        -n "$NAMESPACE" --replicas="$replicas"
+    $KUBECTL rollout status deployment/"$APP" \
+        -n "$NAMESPACE" --timeout=180s
+
+    echo
+    echo "[5/6] Creating Tailscale service..."
+    $KUBECTL apply -f "$MANIFEST_DIR/tailscale.yaml"
+
+    echo
+    echo "[6/6] Deployment complete."
+    echo
+    show_status
+    echo
+    show_urls
+}
+
+destroy_app() {
+    echo "WARNING: This will delete the entire '$NAMESPACE' namespace"
+    echo "and all Equipment Monitor resources inside it."
+    echo
+    read -r -p "Type DESTROY to continue: " answer
+
+    [[ "$answer" == "DESTROY" ]] || {
+        echo "Destroy cancelled."
+        return
+    }
+
+    $KUBECTL delete namespace "$NAMESPACE" --ignore-not-found
+
+    echo
+    echo "✓ Equipment Monitor removed"
+}
+
+show_status() {
+    echo "Equipment Monitor status"
+    echo "========================"
+    echo
+
+    if ! $KUBECTL get namespace "$NAMESPACE" >/dev/null 2>&1; then
+        echo "Namespace '$NAMESPACE' is not deployed."
+        return
+    fi
+
+    echo "Deployments:"
+    $KUBECTL get deployments -n "$NAMESPACE"
+
+    echo
+    echo "Services:"
+    $KUBECTL get services -n "$NAMESPACE"
+}
+
+show_pods() {
+    $KUBECTL get pods -n "$NAMESPACE" -o wide
+}
+
+show_urls() {
+    local host ip
+
+    host=$($KUBECTL get svc "$TAILSCALE_SERVICE" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.status.loadBalancer.ingress[?(@.hostname)].hostname}' \
+        2>/dev/null || true)
+
+    ip=$($KUBECTL get svc "$TAILSCALE_SERVICE" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.status.loadBalancer.ingress[?(@.ip)].ip}' \
+        2>/dev/null || true)
+
+    echo "Equipment Monitor URLs"
+    echo "======================"
+    echo
+    echo "Short:"
+    echo "  http://equipment-monitor"
+
+    if [[ -n "$host" ]]; then
+        echo
+        echo "Tailscale DNS:"
+        echo "  http://$host"
+    fi
+
+    if [[ -n "$ip" ]]; then
+        echo
+        echo "Tailscale IP:"
+        echo "  http://$ip"
+    fi
+}
+
+show_logs() {
+    local component="${1:-app}"
+    local follow=""
+
+    if [[ "${1:-}" == "--follow" || "${1:-}" == "-f" ]]; then
+        component="app"
+        follow="-f"
+    elif [[ "${2:-}" == "--follow" || "${2:-}" == "-f" ]]; then
+        follow="-f"
+    fi
+
+    case "$component" in
+        app|equipment-monitor)
+            $KUBECTL logs -n "$NAMESPACE" \
+                deployment/"$APP" \
+                --all-pods=true \
+                --prefix \
+                $follow
+            ;;
+        redis)
+            $KUBECTL logs -n "$NAMESPACE" \
+                deployment/"$REDIS" \
+                $follow
+            ;;
+        *)
+            die "Unknown log component: $component (use app or redis)"
+            ;;
+    esac
+}
+
+scale_app() {
+    local replicas="${1:-}"
+
+    [[ -n "$replicas" ]] || die "Usage: equipment-monitor scale N"
+    validate_replicas "$replicas"
+
+    echo "Scaling Equipment Monitor to $replicas replicas..."
+
+    $KUBECTL scale deployment/"$APP" \
+        -n "$NAMESPACE" --replicas="$replicas"
+
+    $KUBECTL rollout status deployment/"$APP" \
+        -n "$NAMESPACE" --timeout=180s
+
+    echo
+    $KUBECTL get deployment "$APP" -n "$NAMESPACE"
+}
+
+restart_app() {
+    echo "Restarting Equipment Monitor..."
+
+    $KUBECTL rollout restart deployment/"$APP" -n "$NAMESPACE"
+    $KUBECTL rollout status deployment/"$APP" \
+        -n "$NAMESPACE" --timeout=180s
+
+    echo
+    echo "✓ Restart complete"
+}
+
+health_check() {
+    echo "Equipment Monitor health"
+    echo "========================"
+    echo
+
+    local problems=0
+    local desired ready redis_ready host
+
+    if ! $KUBECTL get namespace "$NAMESPACE" >/dev/null 2>&1; then
+        echo "✗ Namespace not deployed"
+        return 1
+    fi
+
+    desired=$($KUBECTL get deployment "$APP" \
+        -n "$NAMESPACE" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)
+
+    ready=$($KUBECTL get deployment "$APP" \
+        -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+
+    redis_ready=$($KUBECTL get deployment "$REDIS" \
+        -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+
+    [[ -n "$ready" ]] || ready=0
+    [[ -n "$redis_ready" ]] || redis_ready=0
+
+    if [[ "$desired" == "$ready" && "$desired" != "0" ]]; then
+        echo "✓ Application replicas: $ready/$desired ready"
+    else
+        echo "✗ Application replicas: $ready/$desired ready"
+        problems=$((problems + 1))
+    fi
+
+    if [[ "$redis_ready" == "1" ]]; then
+        echo "✓ Redis: ready"
+    else
+        echo "✗ Redis: not ready"
+        problems=$((problems + 1))
+    fi
+
+    if $KUBECTL get svc "$APP" -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo "✓ Kubernetes Service: present"
+    else
+        echo "✗ Kubernetes Service: missing"
+        problems=$((problems + 1))
+    fi
+
+    host=$($KUBECTL get svc "$TAILSCALE_SERVICE" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.status.loadBalancer.ingress[?(@.hostname)].hostname}' \
+        2>/dev/null || true)
+
+    if [[ -n "$host" ]]; then
+        echo "✓ Tailscale: $host"
+    else
+        echo "✗ Tailscale hostname unavailable"
+        problems=$((problems + 1))
+    fi
+
+    echo
+
+    if (( problems == 0 )); then
+        echo "Overall: HEALTHY"
+    else
+        echo "Overall: ATTENTION NEEDED ($problems issue(s))"
+        return 1
+    fi
+}
+
+verify_app() {
+    echo "Equipment Monitor end-to-end verification"
+    echo "========================================="
+    echo
+
+    echo "Waiting for application readiness..."
+    if ! $KUBECTL rollout status deployment/"$APP"         -n "$NAMESPACE" --timeout=60s; then
+        echo
+        echo "✗ Application did not become ready within 60 seconds"
+        return 1
+    fi
+
+    echo
+    health_check || return 1
+
+    echo
+    echo "Testing application /health through Kubernetes Service..."
+
+    local pod="equipment-verify-$$"
+
+    $KUBECTL run "$pod" \
+        -n "$NAMESPACE" \
+        --restart=Never \
+        --image=curlimages/curl \
+        --command -- \
+        curl -fsS "http://$APP/health" >/dev/null
+
+    if $KUBECTL wait \
+        --for=jsonpath='{.status.phase}'=Succeeded \
+        pod/"$pod" \
+        -n "$NAMESPACE" \
+        --timeout=90s >/dev/null 2>&1; then
+
+        $KUBECTL logs "$pod" -n "$NAMESPACE"
+        $KUBECTL delete pod "$pod" \
+            -n "$NAMESPACE" --ignore-not-found >/dev/null
+
+        echo
+        echo "✓ End-to-end Kubernetes health request succeeded"
+    else
+        echo "✗ End-to-end health request failed"
+
+        $KUBECTL logs "$pod" \
+            -n "$NAMESPACE" 2>/dev/null || true
+
+        $KUBECTL delete pod "$pod" \
+            -n "$NAMESPACE" --ignore-not-found >/dev/null || true
+
+        return 1
+    fi
+}
+
+describe_app() {
+    echo "=== Equipment Monitor Deployment ==="
+    $KUBECTL describe deployment "$APP" -n "$NAMESPACE"
+
+    echo
+    echo "=== Redis Deployment ==="
+    $KUBECTL describe deployment "$REDIS" -n "$NAMESPACE"
+
+    echo
+    echo "=== Tailscale Service ==="
+    $KUBECTL describe service "$TAILSCALE_SERVICE" -n "$NAMESPACE"
+}
+
+show_events() {
+    $KUBECTL get events \
+        -n "$NAMESPACE" \
+        --sort-by='.lastTimestamp' | tail -30
+}
+
+show_config() {
+    echo "Equipment Monitor configuration"
+    echo "==============================="
+    echo
+
+    echo "ConfigMap:"
+    $KUBECTL get configmap equipment-monitor-config \
+        -n "$NAMESPACE" -o yaml
+
+    echo
+    echo "Deployment image:"
+    $KUBECTL get deployment "$APP" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+    echo
+    echo
+    echo "Replica count:"
+    $KUBECTL get deployment "$APP" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.spec.replicas}'
+
+    echo
+}
+
+explain_command() {
+    local topic="${1:-}"
+
+    case "$topic" in
+        build)
+            cat <<'EOF'
+BUILD
+
+Builds the Equipment Monitor container image on turing-node01.
+
+Why?
+  k8s-manager is amd64.
+  The Turing Pi worker nodes are arm64.
+  Building on node01 produces the correct ARM64 image.
+
+Pipeline:
+  source -> SCP -> node01 -> docker build -> registry
+
+Registry:
+  192.168.8.191:5000
+
+Underlying tools:
+  ssh
+  scp
+  docker build
+  docker push
+EOF
+            ;;
+
+        deploy)
+            cat <<'EOF'
+DEPLOY
+
+Creates or updates the complete Equipment Monitor application.
+
+Kubernetes concepts:
+  Namespace
+  ConfigMap
+  Deployment
+  Service
+  readiness/liveness probes
+  resource requests/limits
+  Tailscale LoadBalancer
+
+Example:
+  equipment-monitor deploy --replicas 3
+
+The command waits for Redis and the application rollout before
+reporting completion.
+EOF
+            ;;
+
+        scale|replicas)
+            cat <<'EOF'
+SCALE / REPLICAS
+
+Changes the number of Equipment Monitor application pods.
+
+Example:
+  equipment-monitor scale 5
+
+Underlying Kubernetes command:
+  kubectl scale deployment/equipment-monitor --replicas=5
+
+Redis remains at one replica.
+EOF
+            ;;
+
+        node-selector|architecture|arm64)
+            cat <<'EOF'
+NODE SELECTOR / ARM64
+
+The Equipment Monitor image is built for ARM64.
+
+Without a nodeSelector, Kubernetes may schedule a pod onto the amd64
+k8s-manager node.
+
+We observed this during Lab 08:
+  ARM64 worker pods ran successfully.
+  The pod scheduled on k8s-manager failed.
+
+The Deployment therefore contains:
+
+  nodeSelector:
+    kubernetes.io/arch: arm64
+
+This constrains application pods to compatible Turing Pi workers.
+EOF
+            ;;
+
+        tailscale)
+            cat <<'EOF'
+TAILSCALE
+
+The Tailscale Kubernetes Operator exposes Equipment Monitor to your
+tailnet using a LoadBalancer Service.
+
+Short URL:
+  http://equipment-monitor
+
+The Service requests the hostname:
+  equipment-monitor
+
+Inspect it with:
+  kubectl get svc -n equipment-monitor
+EOF
+            ;;
+
+        redis)
+            cat <<'EOF'
+REDIS
+
+Redis provides shared application state.
+
+Because multiple Equipment Monitor replicas can serve requests,
+the visit counter cannot safely live inside one pod's memory.
+
+All replicas connect to the same Redis Service:
+  equipment-redis:6379
+EOF
+            ;;
+
+        configmap|config)
+            cat <<'EOF'
+CONFIGMAP
+
+A ConfigMap stores non-secret application configuration separately
+from the container image.
+
+Equipment Monitor uses it for:
+  APP_NAME
+  SITE_NAME
+  REDIS_HOST
+  REDIS_PORT
+
+Secrets and credentials should NOT be placed in this ConfigMap.
+EOF
+            ;;
+
+        probes|health)
+            cat <<'EOF'
+PROBES / HEALTH
+
+Readiness probe:
+  Determines whether a pod should receive Service traffic.
+
+Liveness probe:
+  Determines whether Kubernetes should restart an unhealthy container.
+
+Equipment Monitor exposes:
+  /health
+
+The CLI health and verify commands add operational checks on top
+of Kubernetes probes.
+EOF
+            ;;
+
+        service)
+            cat <<'EOF'
+SERVICE
+
+A Kubernetes Service provides a stable network endpoint for pods.
+
+equipment-monitor:
+  routes HTTP traffic to the application replicas.
+
+equipment-redis:
+  gives the application a stable Redis hostname.
+
+equipment-monitor-tailscale:
+  exposes the application through Tailscale.
+EOF
+            ;;
+
+        restart)
+            cat <<'EOF'
+RESTART
+
+Performs a Kubernetes rolling restart of Equipment Monitor.
+
+Underlying command:
+  kubectl rollout restart deployment/equipment-monitor
+
+Kubernetes gradually replaces pods instead of stopping the entire
+application at once.
+EOF
+            ;;
+
+        verify)
+            cat <<'EOF'
+VERIFY
+
+Performs an end-to-end application check.
+
+It verifies:
+  application replicas
+  Redis
+  Kubernetes Service
+  Tailscale hostname
+
+Then it creates a temporary curl pod and requests:
+
+  http://equipment-monitor/health
+
+The temporary verification pod is deleted afterward.
+EOF
+            ;;
+
+        destroy)
+            cat <<'EOF'
+DESTROY
+
+Deletes the dedicated equipment-monitor namespace.
+
+Because this application has its own namespace, Kubernetes removes
+the application's resources together.
+
+Safety:
+  You must type DESTROY before deletion occurs.
+
+The default namespace is never deleted.
+EOF
+            ;;
+
+        "")
+            echo "Available explain topics:"
+            echo
+            echo "  build"
+            echo "  deploy"
+            echo "  scale"
+            echo "  node-selector"
+            echo "  tailscale"
+            echo "  redis"
+            echo "  configmap"
+            echo "  probes"
+            echo "  service"
+            echo "  restart"
+            echo "  verify"
+            echo "  destroy"
+            ;;
+
+        *)
+            die "Unknown explain topic: $topic"
+            ;;
+    esac
+}
+
+install_tool() {
+    echo "Installing equipment-monitor..."
+    sudo install -m 0755 "$0" /usr/local/bin/equipment-monitor
+
+    echo
+    echo "Installed:"
+    echo "  /usr/local/bin/equipment-monitor"
+    echo
+    echo "Version:"
+    echo "  $VERSION"
+}
+
+show_version() {
+    echo "equipment-monitor $VERSION"
+}
+
+show_help() {
+    cat <<EOF
+Equipment Monitor Management CLI v$VERSION
+
+USAGE
+  equipment-monitor <command> [options]
+
+COMMANDS
+  build [TAG]                 Build/push ARM64 container image
+  check                       Validate prerequisites
+  deploy                      Deploy with default replicas
+  deploy --replicas N         Deploy with N replicas
+  deploy -r N                 Short replica option
+  destroy                     Safely remove the application
+  status                      Show deployments and services
+  pods                        Show pods and node placement
+  logs                        Show application logs
+  logs redis                  Show Redis logs
+  logs --follow               Follow application logs
+  logs redis --follow         Follow Redis logs
+  scale N                     Scale application to N replicas
+  restart                     Perform rolling restart
+  urls                        Show Tailscale URLs
+  health                      Check component health
+  verify                      Perform end-to-end health verification
+  config                      Show effective configuration
+  describe                    Describe major Kubernetes resources
+  events                      Show recent namespace events
+  explain [TOPIC]             Explain Kubernetes concepts
+  install                     Install CLI globally
+  version                     Show version
+  --help                      Show this help
+
+REPLICA LIMITS
+  Minimum: $MIN_REPLICAS
+  Default: $DEFAULT_REPLICAS
+  Maximum: $MAX_REPLICAS
+
+EXAMPLES
+  equipment-monitor check
+  equipment-monitor build 1.0
+  equipment-monitor deploy
+  equipment-monitor deploy --replicas 5
+  equipment-monitor scale 4
+  equipment-monitor health
+  equipment-monitor verify
+  equipment-monitor logs redis
+  equipment-monitor explain node-selector
+  equipment-monitor urls
+
+FILES
+  Lab:
+    $LAB_DIR
+
+  Manifests:
+    $MANIFEST_DIR
+
+  Build automation:
+    $BUILD_SCRIPT
+
+  Installed CLI:
+    /usr/local/bin/equipment-monitor
+EOF
+}
+
+command="${1:-}"
+[[ $# -gt 0 ]] && shift
+
+case "$command" in
+    "")
+        show_help
+        ;;
+    build)
+        build_app "$@"
+        ;;
+    check)
+        check_prerequisites
+        ;;
+    deploy)
+        deploy_app "$@"
+        ;;
+    destroy)
+        destroy_app
+        ;;
+    status)
+        show_status
+        ;;
+    pods)
+        show_pods
+        ;;
+    logs)
+        show_logs "$@"
+        ;;
+    scale)
+        scale_app "$@"
+        ;;
+    restart)
+        restart_app
+        ;;
+    urls)
+        show_urls
+        ;;
+    health)
+        health_check
+        ;;
+    verify)
+        verify_app
+        ;;
+    config)
+        show_config
+        ;;
+    describe)
+        describe_app
+        ;;
+    events)
+        show_events
+        ;;
+    explain)
+        explain_command "$@"
+        ;;
+    install)
+        install_tool
+        ;;
+    version|--version|-V)
+        show_version
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    *)
+        echo "Unknown command: $command"
+        echo
+        show_help
+        exit 1
+        ;;
+esac

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: equipment-monitor-config
+  namespace: equipment-monitor
+data:
+  APP_NAME: "Equipment Monitor"
+  SITE_NAME: "Turing Pi Kubernetes Lab"
+  REDIS_HOST: "equipment-redis"
+  REDIS_PORT: "6379"
