@@ -1,0 +1,778 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+VERSION="2.0"
+LAB_DIR="$HOME/k8s-lab/labs/07-visitor-counter"
+NAMESPACE="default"
+APP="visitor-counter"
+REDIS="redis"
+TAILSCALE_SERVICE="visitor-counter-tailscale"
+DEFAULT_REPLICAS=3
+MIN_REPLICAS=1
+MAX_REPLICAS=20
+
+header() {
+    echo "Visitor Counter"
+    echo "==============="
+}
+
+validate_replicas() {
+    local replicas="${1:-}"
+
+    if [[ ! "$replicas" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Replica count must be a whole number."
+        exit 1
+    fi
+
+    if (( replicas < MIN_REPLICAS || replicas > MAX_REPLICAS )); then
+        echo "ERROR: Replica count must be between $MIN_REPLICAS and $MAX_REPLICAS."
+        exit 1
+    fi
+}
+
+show_urls() {
+    header
+    echo
+    echo "URLs"
+    echo "----"
+    echo "Short URL:"
+    echo "  http://visitor-counter"
+
+    local host
+    host=$(sudo kubectl get svc "$TAILSCALE_SERVICE" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+        2>/dev/null || true)
+
+    if [[ -n "$host" ]]; then
+        echo
+        echo "Tailscale hostname:"
+        echo "  http://$host"
+    else
+        echo
+        echo "Tailscale address:"
+        echo "  Not currently available"
+    fi
+}
+
+show_status() {
+    header
+    echo
+    echo "Deployments"
+    echo "-----------"
+    sudo kubectl get deployment "$APP" "$REDIS" \
+        -n "$NAMESPACE" 2>/dev/null || true
+
+    echo
+    echo "Services"
+    echo "--------"
+    sudo kubectl get svc "$APP" "$TAILSCALE_SERVICE" "$REDIS" \
+        -n "$NAMESPACE" 2>/dev/null || true
+}
+
+show_pods() {
+    header
+    echo
+    echo "Pods"
+    echo "----"
+
+    sudo kubectl get pods \
+        -n "$NAMESPACE" \
+        -l 'app in (visitor-counter,redis)' \
+        -o wide
+}
+
+show_logs() {
+    local component="${1:-visitor-counter}"
+    local follow=""
+
+    if [[ "$component" == "--follow" || "$component" == "-f" ]]; then
+        component="$APP"
+        follow="-f"
+    elif [[ "${2:-}" == "--follow" || "${2:-}" == "-f" ]]; then
+        follow="-f"
+    fi
+
+    case "$component" in
+        visitor-counter|redis)
+            ;;
+        *)
+            echo "ERROR: Unknown component: $component"
+            echo
+            echo "Valid components:"
+            echo "  visitor-counter"
+            echo "  redis"
+            exit 1
+            ;;
+    esac
+
+    sudo kubectl logs \
+        -n "$NAMESPACE" \
+        deployment/"$component" \
+        --tail=100 $follow
+}
+
+deploy_app() {
+    local replicas="$DEFAULT_REPLICAS"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --replicas|-r)
+                if [[ $# -lt 2 ]]; then
+                    echo "ERROR: $1 requires a replica count."
+                    exit 1
+                fi
+                replicas="$2"
+                shift 2
+                ;;
+            *)
+                echo "ERROR: Unknown deploy option: $1"
+                echo "Try: visitor-counter deploy --help"
+                exit 1
+                ;;
+        esac
+    done
+
+    validate_replicas "$replicas"
+
+    header
+    echo
+    echo "Deploying with $replicas Visitor Counter replica(s)."
+    echo
+
+    echo "[1/4] Deploying Redis..."
+    sudo kubectl apply -f "$LAB_DIR/redis.yml"
+
+    sudo kubectl rollout status deployment/"$REDIS" \
+        -n "$NAMESPACE" \
+        --timeout=120s
+
+    echo
+    echo "[2/4] Deploying Visitor Counter..."
+    sudo kubectl apply -f "$LAB_DIR/visitor-counter.yml"
+
+    echo
+    echo "[3/4] Setting replicas to $replicas..."
+    sudo kubectl scale deployment "$APP" \
+        -n "$NAMESPACE" \
+        --replicas="$replicas"
+
+    sudo kubectl rollout status deployment/"$APP" \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    echo
+    echo "[4/4] Creating Tailscale service..."
+    sudo kubectl apply -f "$LAB_DIR/tailscale-service.yml"
+
+    echo
+    echo "Waiting for Tailscale..."
+
+    local host=""
+
+    for _ in $(seq 1 60); do
+        host=$(sudo kubectl get svc "$TAILSCALE_SERVICE" \
+            -n "$NAMESPACE" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+            2>/dev/null || true)
+
+        [[ -n "$host" ]] && break
+        sleep 2
+    done
+
+    echo
+    echo "Visitor Counter deployment complete."
+    echo
+    echo "Replicas:"
+    echo "  $replicas"
+    echo
+    echo "Open:"
+    echo "  http://visitor-counter"
+
+    if [[ -n "$host" ]]; then
+        echo
+        echo "Tailscale hostname:"
+        echo "  http://$host"
+    fi
+}
+
+scale_app() {
+    local replicas="${1:-}"
+
+    if [[ -z "$replicas" ]]; then
+        echo "Usage: visitor-counter scale <replicas>"
+        exit 1
+    fi
+
+    validate_replicas "$replicas"
+
+    echo "Scaling Visitor Counter to $replicas replica(s)..."
+
+    sudo kubectl scale deployment "$APP" \
+        -n "$NAMESPACE" \
+        --replicas="$replicas"
+
+    sudo kubectl rollout status deployment/"$APP" \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    echo
+    echo "Scale complete."
+    sudo kubectl get deployment "$APP" -n "$NAMESPACE"
+}
+
+restart_app() {
+    echo "Restarting Visitor Counter..."
+
+    sudo kubectl rollout restart deployment/"$APP" \
+        -n "$NAMESPACE"
+
+    sudo kubectl rollout status deployment/"$APP" \
+        -n "$NAMESPACE" \
+        --timeout=180s
+
+    echo
+    echo "Restart complete."
+}
+
+health_check() {
+    header
+    echo
+    echo "Health Check"
+    echo "------------"
+
+    local failed=0
+
+    if sudo kubectl get deployment "$APP" -n "$NAMESPACE" >/dev/null 2>&1; then
+        local desired ready
+        desired=$(sudo kubectl get deployment "$APP" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.replicas}')
+        ready=$(sudo kubectl get deployment "$APP" -n "$NAMESPACE" \
+            -o jsonpath='{.status.readyReplicas}')
+        ready="${ready:-0}"
+
+        if [[ "$desired" == "$ready" ]]; then
+            echo "✓ Visitor Counter: $ready/$desired replicas ready"
+        else
+            echo "✗ Visitor Counter: $ready/$desired replicas ready"
+            failed=1
+        fi
+    else
+        echo "✗ Visitor Counter deployment not found"
+        failed=1
+    fi
+
+    if sudo kubectl get deployment "$REDIS" -n "$NAMESPACE" >/dev/null 2>&1; then
+        local redis_ready
+        redis_ready=$(sudo kubectl get deployment "$REDIS" -n "$NAMESPACE" \
+            -o jsonpath='{.status.readyReplicas}')
+        redis_ready="${redis_ready:-0}"
+
+        if [[ "$redis_ready" == "1" ]]; then
+            echo "✓ Redis: ready"
+        else
+            echo "✗ Redis: not ready"
+            failed=1
+        fi
+    else
+        echo "✗ Redis deployment not found"
+        failed=1
+    fi
+
+    if sudo kubectl get svc "$APP" -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo "✓ Visitor Counter service: present"
+    else
+        echo "✗ Visitor Counter service: missing"
+        failed=1
+    fi
+
+    if sudo kubectl get svc "$REDIS" -n "$NAMESPACE" >/dev/null 2>&1; then
+        echo "✓ Redis service: present"
+    else
+        echo "✗ Redis service: missing"
+        failed=1
+    fi
+
+    local host
+    host=$(sudo kubectl get svc "$TAILSCALE_SERVICE" \
+        -n "$NAMESPACE" \
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
+        2>/dev/null || true)
+
+    if [[ -n "$host" ]]; then
+        echo "✓ Tailscale: $host"
+    else
+        echo "✗ Tailscale hostname not available"
+        failed=1
+    fi
+
+    echo
+
+    if (( failed == 0 )); then
+        echo "Overall: HEALTHY"
+    else
+        echo "Overall: ATTENTION NEEDED"
+        return 1
+    fi
+}
+
+describe_app() {
+    echo "Visitor Counter Deployment"
+    echo "=========================="
+    sudo kubectl describe deployment "$APP" -n "$NAMESPACE"
+
+    echo
+    echo "Redis Deployment"
+    echo "================"
+    sudo kubectl describe deployment "$REDIS" -n "$NAMESPACE"
+}
+
+show_events() {
+    sudo kubectl get events \
+        -n "$NAMESPACE" \
+        --sort-by='.lastTimestamp' |
+        tail -n 30
+}
+
+destroy_app() {
+    header
+    echo
+    echo "Destroy"
+    echo "-------"
+    echo
+    echo "This will remove:"
+    echo "  - Visitor Counter deployment"
+    echo "  - Visitor Counter NodePort service"
+    echo "  - Visitor Counter Tailscale service"
+    echo "  - Redis deployment"
+    echo "  - Redis service"
+    echo
+    echo "The default namespace will NOT be deleted."
+    echo
+
+    local answer
+    read -rp "Destroy Visitor Counter? [y/N] " answer
+
+    case "$answer" in
+        y|Y|yes|YES)
+            sudo kubectl delete svc "$TAILSCALE_SERVICE" \
+                -n "$NAMESPACE" \
+                --ignore-not-found
+
+            sudo kubectl delete -f "$LAB_DIR/visitor-counter.yml" \
+                --ignore-not-found
+
+            sudo kubectl delete -f "$LAB_DIR/redis.yml" \
+                --ignore-not-found
+
+            echo
+            echo "Visitor Counter destroyed."
+            ;;
+        *)
+            echo "Cancelled."
+            ;;
+    esac
+}
+
+explain_command() {
+    local topic="${1:-}"
+
+    case "$topic" in
+        deploy)
+            cat <<'HELP'
+DEPLOY
+======
+
+Example:
+  visitor-counter deploy --replicas 5
+
+What it does:
+  Creates or updates Redis and Visitor Counter, selects the desired
+  replica count, waits for the rollout, and creates Tailscale access.
+
+Kubernetes concepts:
+  kubectl apply
+  Deployments
+  Services
+  Replica scaling
+  Rollouts
+
+Under the hood:
+  kubectl apply -f redis.yml
+  kubectl apply -f visitor-counter.yml
+  kubectl scale deployment visitor-counter --replicas=5
+  kubectl rollout status deployment/visitor-counter
+  kubectl apply -f tailscale-service.yml
+HELP
+            ;;
+
+        scale|replicas)
+            cat <<'HELP'
+SCALE / REPLICAS
+================
+
+Example:
+  visitor-counter scale 5
+
+What it does:
+  Changes the desired number of Visitor Counter Pods.
+
+Kubernetes concept:
+  A Deployment maintains a desired number of replicas. Kubernetes
+  creates or removes Pods until actual state matches desired state.
+
+Under the hood:
+  kubectl scale deployment visitor-counter --replicas=5
+
+Verify with:
+  kubectl get deployment visitor-counter
+  kubectl get pods -l app=visitor-counter -o wide
+HELP
+            ;;
+
+        restart)
+            cat <<'HELP'
+RESTART
+=======
+
+Example:
+  visitor-counter restart
+
+What it does:
+  Performs a rolling restart of the Visitor Counter Deployment.
+
+Kubernetes concept:
+  Rolling restart replaces Pods gradually while the Deployment
+  controller maintains the application.
+
+Under the hood:
+  kubectl rollout restart deployment/visitor-counter
+  kubectl rollout status deployment/visitor-counter
+HELP
+            ;;
+
+        health)
+            cat <<'HELP'
+HEALTH
+======
+
+Example:
+  visitor-counter health
+
+What it checks:
+  Visitor Counter replica readiness
+  Redis readiness
+  Kubernetes Services
+  Tailscale LoadBalancer provisioning
+
+Useful Kubernetes commands:
+  kubectl get deployment
+  kubectl get pods
+  kubectl get svc
+HELP
+            ;;
+
+        destroy)
+            cat <<'HELP'
+DESTROY
+=======
+
+Example:
+  visitor-counter destroy
+
+What it does:
+  Removes the Visitor Counter, Redis, and Tailscale resources.
+
+Important:
+  The default namespace is NOT deleted.
+
+Kubernetes concept:
+  kubectl delete removes resources from the cluster while leaving
+  the source YAML files intact so they can be deployed again.
+HELP
+            ;;
+
+        logs)
+            cat <<'HELP'
+LOGS
+====
+
+Examples:
+  visitor-counter logs
+  visitor-counter logs redis
+  visitor-counter logs --follow
+
+Kubernetes concept:
+  kubectl logs reads container output from Pods managed by a Deployment.
+
+Under the hood:
+  kubectl logs deployment/visitor-counter --tail=100
+  kubectl logs deployment/redis --tail=100
+HELP
+            ;;
+
+        tailscale)
+            cat <<'HELP'
+TAILSCALE
+=========
+
+Visitor Counter uses a Kubernetes LoadBalancer Service with:
+
+  loadBalancerClass: tailscale
+
+The Tailscale Kubernetes Operator provisions a Tailscale endpoint for
+the Service.
+
+Short URL:
+  http://visitor-counter
+
+Inspect with:
+  kubectl get svc visitor-counter-tailscale
+HELP
+            ;;
+
+        service)
+            cat <<'HELP'
+SERVICE
+=======
+
+Visitor Counter has Kubernetes Services that provide stable network
+access to Pods.
+
+Visitor Counter:
+  NodePort service -> application Pods on port 5000
+
+Redis:
+  ClusterIP service -> Redis on port 6379
+
+Tailscale:
+  LoadBalancer service -> Visitor Counter application
+HELP
+            ;;
+
+        redis)
+            cat <<'HELP'
+REDIS
+=====
+
+Redis stores the Visitor Counter application's counter data.
+
+The application reaches Redis using Kubernetes DNS:
+
+  redis:6379
+
+This works because the Redis Service is named "redis".
+HELP
+            ;;
+
+        "")
+            echo "Explain topics:"
+            echo "  deploy"
+            echo "  scale"
+            echo "  replicas"
+            echo "  restart"
+            echo "  health"
+            echo "  destroy"
+            echo "  logs"
+            echo "  tailscale"
+            echo "  service"
+            echo "  redis"
+            ;;
+
+        *)
+            echo "Unknown explain topic: $topic"
+            echo
+            explain_command
+            exit 1
+            ;;
+    esac
+}
+
+install_tool() {
+    echo "Installing visitor-counter..."
+    sudo install -m 755 "$0" /usr/local/bin/visitor-counter
+    echo
+    echo "Installed:"
+    echo "  /usr/local/bin/visitor-counter"
+    echo
+    echo "Version:"
+    echo "  $VERSION"
+}
+
+show_version() {
+    echo "visitor-counter $VERSION"
+}
+
+show_help() {
+    cat <<'HELP'
+Visitor Counter Management Tool
+===============================
+
+Usage:
+  visitor-counter [command] [options]
+
+Commands:
+  status                     Show deployments and services
+  urls                       Show application URLs
+  pods                       Show Visitor Counter and Redis Pods
+
+  logs                       Show Visitor Counter logs
+  logs redis                 Show Redis logs
+  logs --follow              Follow Visitor Counter logs
+  logs redis --follow        Follow Redis logs
+
+  deploy                     Deploy with default 3 replicas
+  deploy --replicas N        Deploy with N replicas
+  deploy -r N                Short form of --replicas
+
+  scale N                    Scale a running deployment
+  restart                    Perform a rolling restart
+  health                     Run application health checks
+  describe                   Detailed Kubernetes information
+  events                     Show recent Kubernetes events
+
+  destroy                    Destroy application resources
+
+  explain                    List learning topics
+  explain <topic>            Explain what a command/concept does
+
+  install                    Install/update this tool globally
+  version                    Show tool version
+  help                       Show this help
+
+Examples:
+  visitor-counter
+  visitor-counter status
+  visitor-counter health
+  visitor-counter urls
+  visitor-counter pods
+
+  visitor-counter deploy
+  visitor-counter deploy --replicas 5
+  visitor-counter deploy -r 5
+
+  visitor-counter scale 2
+  visitor-counter restart
+
+  visitor-counter logs
+  visitor-counter logs redis
+  visitor-counter logs --follow
+  visitor-counter logs redis --follow
+
+  visitor-counter describe
+  visitor-counter events
+
+  visitor-counter explain
+  visitor-counter explain deploy
+  visitor-counter explain scale
+  visitor-counter explain tailscale
+  visitor-counter explain redis
+
+  visitor-counter destroy
+  visitor-counter version
+  visitor-counter --help
+
+Replica limits:
+  Minimum: 1
+  Maximum: 20
+  Default: 3
+
+Application URL:
+  http://visitor-counter
+
+Source:
+  ~/k8s-lab/tools/visitor-counter
+
+Manifests:
+  ~/k8s-lab/labs/07-visitor-counter/redis.yml
+  ~/k8s-lab/labs/07-visitor-counter/visitor-counter.yml
+  ~/k8s-lab/labs/07-visitor-counter/tailscale-service.yml
+
+Installed command:
+  /usr/local/bin/visitor-counter
+HELP
+}
+
+case "${1:-}" in
+    "")
+        show_urls
+        echo
+        show_status
+        ;;
+
+    status)
+        show_status
+        ;;
+
+    urls)
+        show_urls
+        ;;
+
+    pods)
+        show_pods
+        ;;
+
+    logs)
+        shift
+        show_logs "$@"
+        ;;
+
+    deploy)
+        shift
+        if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+            explain_command deploy
+        else
+            deploy_app "$@"
+        fi
+        ;;
+
+    scale)
+        shift
+        scale_app "$@"
+        ;;
+
+    restart)
+        restart_app
+        ;;
+
+    health)
+        health_check
+        ;;
+
+    describe)
+        describe_app
+        ;;
+
+    events)
+        show_events
+        ;;
+
+    destroy)
+        destroy_app
+        ;;
+
+    explain)
+        shift
+        explain_command "${1:-}"
+        ;;
+
+    install)
+        install_tool
+        ;;
+
+    version|--version|-V)
+        show_version
+        ;;
+
+    help|-h|--help)
+        show_help
+        ;;
+
+    *)
+        echo "ERROR: Unknown command: $1"
+        echo
+        show_help
+        exit 1
+        ;;
+esac
