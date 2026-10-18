@@ -52,12 +52,13 @@
       ansible.builtin.command: >-
         kubectl auth can-i {{ item.verb }} {{ item.resource }}
         --as=system:serviceaccount:academy-labs:academy-lab-controller -n {{ item.ns }}
+        {{ ('--subresource=' ~ item.sub) if item.sub is defined else '' }}
       loop:
         - { verb: create, resource: pods, ns: academy-labs, expect: "yes" }
         - { verb: delete, resource: pods, ns: academy-labs, expect: "yes" }
         - { verb: create, resource: pods, ns: default, expect: "no" }
         - { verb: create, resource: services, ns: academy-labs, expect: "no" }
-        - { verb: create, resource: pods/exec, ns: academy-labs, expect: "no" }
+        - { verb: create, resource: pods, sub: exec, ns: academy-labs, expect: "no" }
         - { verb: get, resource: secrets, ns: academy-labs, expect: "no" }
         - { verb: delete, resource: namespaces, ns: academy-labs, expect: "no" }
       register: cani
