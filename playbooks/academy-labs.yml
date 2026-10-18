@@ -30,23 +30,39 @@
       check_mode: false
       failed_when: "'networkpolicies.networking.k8s.io' not in netapi.stdout"
 
-    - name: Preview changes (server-side dry run)
+    - name: Check whether academy-labs already exists
+      ansible.builtin.command: kubectl get namespace academy-labs -o name
+      register: ns
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # First run: kubectl diff can't preview objects inside a namespace that doesn't exist yet,
+    # so list what would be created instead (client-side dry run; nothing is sent to be stored).
+    - name: Preview first-time setup (nothing is created)
+      ansible.builtin.command: kubectl apply --dry-run=client -f {{ manifest }} -o name
+      register: first_preview
+      changed_when: true
+      check_mode: false
+      when: ns.rc != 0
+
+    - name: Preview changes to the existing setup (server-side dry run)
       ansible.builtin.command: kubectl diff --server-side -f {{ manifest }}
       register: diff
       changed_when: diff.rc == 1
       failed_when: diff.rc > 1
       check_mode: false
+      when: ns.rc == 0
 
     - name: Show the preview
       ansible.builtin.debug:
-        var: diff.stdout_lines
-      when: diff.rc == 1
+        msg: "{{ (first_preview.stdout_lines | default([])) if ns.rc != 0 else ((diff.stdout_lines | default([])) or ['No changes']) }}"
 
     - name: Apply
       ansible.builtin.command: kubectl apply --server-side -f {{ manifest }}
       register: applied
-      changed_when: "'serverside-applied' in applied.stdout and diff.rc == 1"
-      when: not ansible_check_mode
+      changed_when: ns.rc != 0 or diff.rc == 1
+      when: not ansible_check_mode and (ns.rc != 0 or diff.rc == 1)
 
     - name: Verify the controller can only act inside academy-labs
       ansible.builtin.command: >-
