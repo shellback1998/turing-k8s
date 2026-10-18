@@ -1,0 +1,188 @@
+# Scott Academy Linux labs: one-time cluster setup (see shellback1998/scottacademy docs/labs-design.md).
+# Every lab is one pod in the academy-labs namespace. Nothing here grants access outside it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: academy-labs
+  labels:
+    app.kubernetes.io/part-of: scott-academy
+    # Pod Security "restricted": non-root, no privilege escalation, all capabilities dropped,
+    # default seccomp. Pods that don't meet it are rejected by the API server.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# Caps for the whole namespace: at most two labs at once (design rule), small footprint,
+# and no Services so a lab can never be exposed on the network.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: academy-labs-quota
+  namespace: academy-labs
+spec:
+  hard:
+    pods: "2"
+    requests.cpu: "1"
+    limits.cpu: "1"
+    requests.memory: 1Gi
+    limits.memory: 1Gi
+    requests.ephemeral-storage: 2Gi
+    limits.ephemeral-storage: 2Gi
+    services: "0"
+    persistentvolumeclaims: "0"
+    configmaps: "2"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: academy-labs-limits
+  namespace: academy-labs
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+        ephemeral-storage: 1Gi
+      defaultRequest:
+        cpu: 250m
+        memory: 256Mi
+        ephemeral-storage: 512Mi
+      max:
+        cpu: 500m
+        memory: 512Mi
+        ephemeral-storage: 1Gi
+---
+# Network: deny everything in and out by default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: academy-labs
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS lookups through the cluster DNS only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cluster-dns
+  namespace: academy-labs
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# HTTPS to the public internet, only for labs marked as needing it (for example pip install).
+# Private, Tailscale, link-local (cloud metadata) and loopback ranges stay blocked.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internet-https-when-labelled
+  namespace: academy-labs
+spec:
+  podSelector:
+    matchLabels:
+      academy.scottgaudet.com/internet: "true"
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# Pods in this namespace get no Kubernetes API token unless they ask for one (labs never do).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: academy-labs
+automountServiceAccountToken: false
+---
+# The lab controller (runs on devops-manager) starts, watches and ends lab pods. Nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: academy-lab-controller
+  namespace: academy-labs
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: academy-lab-controller
+  namespace: academy-labs
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, watch, delete, deletecollection]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: academy-lab-controller
+  namespace: academy-labs
+subjects:
+  - kind: ServiceAccount
+    name: academy-lab-controller
+    namespace: academy-labs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: academy-lab-controller
+---
+# The browser viewer (Guacamole's kubernetes protocol) attaches to a running lab's terminal.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: academy-lab-viewer
+  namespace: academy-labs
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: academy-lab-viewer
+  namespace: academy-labs
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/attach]
+    verbs: [get, create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: academy-lab-viewer
+  namespace: academy-labs
+subjects:
+  - kind: ServiceAccount
+    name: academy-lab-viewer
+    namespace: academy-labs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: academy-lab-viewer

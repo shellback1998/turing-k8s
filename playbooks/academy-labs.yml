@@ -1,0 +1,96 @@
+---
+# Scott Academy Linux labs: one-time cluster setup and image pre-pull.
+#
+#   Preview (no changes):  ansible-playbook playbooks/academy-labs.yml --check --diff
+#   Apply:                 ansible-playbook playbooks/academy-labs.yml
+#   Pre-pull a new image:  ansible-playbook playbooks/academy-labs.yml --tags prepull -e academy_lab_image_tag=<tag>
+#
+# Creates only the academy-labs namespace and what's inside it (see academy-labs/cluster-setup.yaml).
+# It never deletes anything; removing the labs is `kubectl delete namespace academy-labs`.
+
+- name: Apply the academy-labs namespace, limits, network rules and RBAC
+  hosts: k8s_manager
+  gather_facts: false
+  tags: [cluster]
+
+  vars:
+    manifest: "{{ playbook_dir }}/../academy-labs/cluster-setup.yaml"
+
+  tasks:
+    - name: Confirm kubectl reaches the cluster
+      ansible.builtin.command: kubectl get nodes -o name
+      register: nodes
+      changed_when: false
+      check_mode: false
+
+    - name: Check that the cluster enforces NetworkPolicy (K3s network policy controller)
+      ansible.builtin.command: kubectl api-resources --api-group=networking.k8s.io -o name
+      register: netapi
+      changed_when: false
+      check_mode: false
+      failed_when: "'networkpolicies.networking.k8s.io' not in netapi.stdout"
+
+    - name: Preview changes (server-side dry run)
+      ansible.builtin.command: kubectl diff --server-side -f {{ manifest }}
+      register: diff
+      changed_when: diff.rc == 1
+      failed_when: diff.rc > 1
+      check_mode: false
+
+    - name: Show the preview
+      ansible.builtin.debug:
+        var: diff.stdout_lines
+      when: diff.rc == 1
+
+    - name: Apply
+      ansible.builtin.command: kubectl apply --server-side -f {{ manifest }}
+      register: applied
+      changed_when: "'serverside-applied' in applied.stdout and diff.rc == 1"
+      when: not ansible_check_mode
+
+    - name: Verify the controller can only act inside academy-labs
+      ansible.builtin.command: >-
+        kubectl auth can-i {{ item.verb }} {{ item.resource }}
+        --as=system:serviceaccount:academy-labs:academy-lab-controller -n {{ item.ns }}
+      loop:
+        - { verb: create, resource: pods, ns: academy-labs, expect: "yes" }
+        - { verb: delete, resource: pods, ns: academy-labs, expect: "yes" }
+        - { verb: create, resource: pods, ns: default, expect: "no" }
+        - { verb: create, resource: services, ns: academy-labs, expect: "no" }
+        - { verb: create, resource: pods/exec, ns: academy-labs, expect: "no" }
+        - { verb: get, resource: secrets, ns: academy-labs, expect: "no" }
+        - { verb: delete, resource: namespaces, ns: academy-labs, expect: "no" }
+      register: cani
+      changed_when: false
+      failed_when: cani.stdout != item.expect
+      when: not ansible_check_mode
+
+- name: Pre-pull the lab image on the Turing Pi workers
+  hosts: turing_workers
+  become: true
+  gather_facts: false
+  tags: [prepull]
+
+  vars:
+    academy_lab_image: "192.168.8.191:5000/academy-lab-linux:{{ academy_lab_image_tag }}"
+
+  tasks:
+    - name: Require an explicit image tag
+      ansible.builtin.assert:
+        that: academy_lab_image_tag is defined and academy_lab_image_tag | length > 0
+        fail_msg: "Pass -e academy_lab_image_tag=<tag>"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Check free disk space (nodes 02-07 are tight)
+      ansible.builtin.shell: df --output=avail -BM /var/lib/rancher | tail -1 | tr -dc '0-9'
+      register: free_mb
+      changed_when: false
+      check_mode: false
+      failed_when: free_mb.stdout | int < 800
+
+    - name: Pull the image into containerd
+      ansible.builtin.command: k3s crictl pull {{ academy_lab_image }}
+      register: pull
+      changed_when: "'Image is up to date' in pull.stdout or 'sha256:' in pull.stdout"
+      when: not ansible_check_mode

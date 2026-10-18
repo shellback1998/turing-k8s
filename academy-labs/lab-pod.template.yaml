@@ -1,0 +1,45 @@
+# One Linux lab, as the lab controller will create it. LAB_ID, IMAGE and INTERNET are filled in
+# per lab. activeDeadlineSeconds stops the pod even if the controller is down (90 minutes =
+# 60-minute lab + one 30-minute extension).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lab-${LAB_ID}
+  namespace: academy-labs
+  labels:
+    app.kubernetes.io/name: academy-lab
+    academy.scottgaudet.com/lab-id: "${LAB_ID}"
+    academy.scottgaudet.com/internet: "${INTERNET}"
+spec:
+  activeDeadlineSeconds: 5400
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  terminationGracePeriodSeconds: 5
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+  containers:
+    - name: lab
+      image: ${IMAGE}
+      imagePullPolicy: IfNotPresent
+      stdin: true
+      tty: true
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 512Mi }
+        limits: { cpu: 500m, memory: 512Mi, ephemeral-storage: 1Gi }
