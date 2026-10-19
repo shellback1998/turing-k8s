@@ -196,7 +196,7 @@
         mode: "0600"
         content: |
           # Scott Academy labs ({{ item }} site). Installed by install-on-academy-host.sh.
-          ACADEMY_LABS_DIR=/etc/scottacademy/labs
+          ACADEMY_LABS_DIR=/etc/scottacademy-labs
           ACADEMY_LABS_K8S_URL={{ academy_k8s_api_url }}
           ACADEMY_LABS_IMAGE={{ academy_lab_image }}
           ACADEMY_LABS_SITE={{ item }}
