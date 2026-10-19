@@ -117,7 +117,7 @@ metadata:
   namespace: academy-labs
 automountServiceAccountToken: false
 ---
-# The lab controller (runs on devops-manager) starts, watches and ends lab pods. Nothing else.
+# The lab controller (the Academy server on turing-manager) starts, extends and ends lab pods. Nothing else.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -133,7 +133,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: [pods]
-    verbs: [create, get, list, watch, delete, deletecollection]
+    verbs: [create, get, list, watch, patch, delete, deletecollection]
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]
@@ -152,14 +152,11 @@ roleRef:
   kind: Role
   name: academy-lab-controller
 ---
-# The browser viewer (Guacamole's kubernetes protocol) attaches to a running lab's terminal.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: academy-lab-viewer
-  namespace: academy-labs
-automountServiceAccountToken: false
----
+# The browser viewer (Guacamole's kubernetes protocol) opens a shell in a running lab
+# (kubectl exec), one per terminal, so several tabs or a reconnect never share a TTY.
+# Guacamole authenticates with a client certificate (CN=academy-lab-viewer, issued by playbooks/academy-viewer.yml),
+# so the binding is to that user name, not a service account. The certificate's key stays on
+# turing-manager and only ever travels inside encrypted, one-minute viewer sign-ins.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -170,7 +167,7 @@ rules:
     resources: [pods]
     verbs: [get]
   - apiGroups: [""]
-    resources: [pods/attach]
+    resources: [pods/exec]
     verbs: [get, create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -179,10 +176,20 @@ metadata:
   name: academy-lab-viewer
   namespace: academy-labs
 subjects:
-  - kind: ServiceAccount
+  - kind: User
     name: academy-lab-viewer
-    namespace: academy-labs
+    apiGroup: rbac.authorization.k8s.io
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: academy-lab-viewer
+---
+# Long-lived API token for the lab controller (the Academy server). Readable only by cluster admins.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: academy-lab-controller-token
+  namespace: academy-labs
+  annotations:
+    kubernetes.io/service-account.name: academy-lab-controller
+type: kubernetes.io/service-account-token

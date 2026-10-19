@@ -1,6 +1,8 @@
-# One Linux lab, as the lab controller will create it. LAB_ID, IMAGE and INTERNET are filled in
-# per lab. activeDeadlineSeconds stops the pod even if the controller is down (90 minutes =
-# 60-minute lab + one 30-minute extension).
+# One Linux lab, as the Academy server creates it (lib/server/labs/service.ts in scottacademy;
+# keep the two in step). LAB_ID, IMAGE and INTERNET are filled in per lab. activeDeadlineSeconds
+# stops the pod even if the Academy is down (95 minutes = 60-minute lab + one 30-minute
+# extension + 5 minutes' grace). The main process only idles; each browser terminal is its own
+# shell opened with exec by the viewer.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -11,7 +13,7 @@ metadata:
     academy.scottgaudet.com/lab-id: "${LAB_ID}"
     academy.scottgaudet.com/internet: "${INTERNET}"
 spec:
-  activeDeadlineSeconds: 5400
+  activeDeadlineSeconds: 5700
   restartPolicy: Never
   automountServiceAccountToken: false
   enableServiceLinks: false
@@ -34,8 +36,9 @@ spec:
     - name: lab
       image: ${IMAGE}
       imagePullPolicy: IfNotPresent
-      stdin: true
-      tty: true
+      command: ["/bin/bash", "-c", "trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done"]
+      env:
+        - { name: TERM, value: xterm-256color }
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:

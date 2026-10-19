@@ -1,0 +1,218 @@
+# Scott Academy lab viewer (Apache Guacamole) and the files the Academy server needs.
+#
+#   Set up or update the viewer:   ansible-playbook playbooks/academy-viewer.yml --tags viewer
+#   Export the Academy's config:   ansible-playbook playbooks/academy-viewer.yml --tags export -e academy_lab_image_tag=<tag>
+#
+# Run playbooks/academy-labs.yml first (namespace, RBAC, controller token).
+# Secrets are generated here and only ever stored in the cluster and in the export bundle
+# (~/academy-labs-bundle, mode 0700), which install-on-academy-host.sh deletes once installed.
+
+- name: Lab viewer (guacd + Guacamole) in academy-viewer
+  hosts: k8s_manager
+  gather_facts: false
+  tags: [viewer]
+
+  vars:
+    manifest: "{{ playbook_dir }}/../academy-labs/viewer.yaml"
+
+  tasks:
+    - name: Require the lab namespace (playbooks/academy-labs.yml)
+      ansible.builtin.command: kubectl get namespace academy-labs -o name
+      changed_when: false
+      check_mode: false
+
+    - name: Check whether academy-viewer already exists
+      ansible.builtin.command: kubectl get namespace academy-viewer -o name
+      register: ns
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Create the academy-viewer namespace
+      ansible.builtin.command: kubectl create namespace academy-viewer
+      when: ns.rc != 0
+
+    - name: Check for the viewer sign-in key
+      ansible.builtin.command: kubectl -n academy-viewer get secret academy-viewer-json -o name
+      register: jsonkey
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Generate the viewer sign-in key (AES-128, 32 hex characters)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n academy-viewer create secret generic academy-viewer-json --from-literal=key="$(openssl rand -hex 16)"
+      args: { executable: /bin/bash }
+      no_log: true
+      when: jsonkey.rc != 0
+
+    - name: Check the viewer's client certificate (renewed when under 30 days left)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n academy-viewer get secret academy-lab-viewer-cert -o jsonpath='{.data.tls\.crt}' \
+          | base64 -d | openssl x509 -noout -checkend 2592000
+      args: { executable: /bin/bash }
+      register: cert
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Issue the viewer's client certificate (CN=academy-lab-viewer) through the CSR API
+      ansible.builtin.shell: |
+        set -euo pipefail
+        work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+        openssl req -new -newkey rsa:2048 -nodes -subj "/CN=academy-lab-viewer" \
+          -keyout "$work/tls.key" -out "$work/tls.csr" 2>/dev/null
+        kubectl delete csr academy-lab-viewer --ignore-not-found >/dev/null
+        cat <<YAML | kubectl apply -f - >/dev/null
+        apiVersion: certificates.k8s.io/v1
+        kind: CertificateSigningRequest
+        metadata:
+          name: academy-lab-viewer
+        spec:
+          request: $(base64 -w0 < "$work/tls.csr")
+          signerName: kubernetes.io/kube-apiserver-client
+          expirationSeconds: 31536000
+          usages: [client auth]
+        YAML
+        kubectl certificate approve academy-lab-viewer >/dev/null
+        for _ in $(seq 30); do
+          crt=$(kubectl get csr academy-lab-viewer -o jsonpath='{.status.certificate}')
+          [[ -n "$crt" ]] && break
+          sleep 1
+        done
+        [[ -n "$crt" ]] || { echo "certificate was not issued" >&2; exit 1; }
+        echo "$crt" | base64 -d > "$work/tls.crt"
+        kubectl -n academy-viewer create secret tls academy-lab-viewer-cert \
+          --cert="$work/tls.crt" --key="$work/tls.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl delete csr academy-lab-viewer >/dev/null
+        openssl x509 -in "$work/tls.crt" -noout -subject -enddate
+      args: { executable: /bin/bash }
+      register: issued
+      when: cert.rc != 0
+
+    - name: Show the new certificate
+      ansible.builtin.debug:
+        var: issued.stdout_lines
+      when: issued is changed
+
+    # First run in --check mode: the namespace doesn't exist yet, so list what would be created.
+    - name: Preview first-time setup (nothing is created)
+      ansible.builtin.command: kubectl apply --dry-run=client -f {{ manifest }} -o name
+      register: first_preview
+      changed_when: true
+      check_mode: false
+      when: ns.rc != 0 and ansible_check_mode
+
+    - name: Preview changes (server-side dry run)
+      ansible.builtin.command: kubectl diff --server-side -f {{ manifest }}
+      register: diff
+      changed_when: diff.rc == 1
+      failed_when: diff.rc > 1
+      check_mode: false
+      when: ns.rc == 0 or not ansible_check_mode
+
+    - name: Show the preview
+      ansible.builtin.debug:
+        msg: "{{ first_preview.stdout_lines if first_preview is not skipped else ((diff.stdout_lines | default([])) or ['No changes']) }}"
+
+    - name: Apply the viewer
+      ansible.builtin.command: kubectl apply --server-side -f {{ manifest }}
+      when: not ansible_check_mode and diff.rc == 1
+
+    - name: Wait for the viewer to be ready (first pull of the images takes a few minutes)
+      ansible.builtin.command: kubectl -n academy-viewer rollout status deploy/{{ item }} --timeout=600s
+      loop: [guacd, guacamole]
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Check the viewer answers on its NodePort
+      ansible.builtin.uri:
+        url: "{{ academy_viewer_check_url | default('http://127.0.0.1:30880') }}/viewer/"
+        status_code: 200
+      retries: 10
+      delay: 6
+      register: page
+      until: page.status == 200
+      when: not ansible_check_mode
+
+    - name: Verify the viewer can open shells in labs and nothing else
+      ansible.builtin.command: >-
+        kubectl auth can-i {{ item.verb }} {{ item.resource }} --as=academy-lab-viewer -n {{ item.ns }}
+        {{ ('--subresource=' ~ item.sub) if item.sub is defined else '' }}
+      loop:
+        - { verb: create, resource: pods, sub: exec, ns: academy-labs, expect: "yes" }
+        - { verb: create, resource: pods, sub: exec, ns: default, expect: "no" }
+        - { verb: create, resource: pods, ns: academy-labs, expect: "no" }
+        - { verb: get, resource: secrets, ns: academy-labs, expect: "no" }
+        - { verb: get, resource: secrets, ns: academy-viewer, expect: "no" }
+      register: cani
+      changed_when: false
+      failed_when: cani.stdout != item.expect
+      when: not ansible_check_mode
+
+- name: Export the Academy server's lab settings
+  hosts: k8s_manager
+  gather_facts: false
+  tags: [export, never]
+
+  vars:
+    bundle: "{{ lookup('env', 'HOME') }}/academy-labs-bundle"
+    # How turing-manager reaches the cluster (API) and the viewer (NodePort).
+    academy_k8s_api_url: https://192.168.8.115:6443
+    academy_viewer_url: http://192.168.8.115:30880/viewer
+    academy_lab_image: "192.168.8.191:5000/academy-lab-linux:{{ academy_lab_image_tag }}"
+
+  tasks:
+    - name: Require an explicit lab image tag
+      ansible.builtin.assert:
+        that: academy_lab_image_tag is defined and academy_lab_image_tag | length > 0
+        fail_msg: "Pass -e academy_lab_image_tag=<tag> (the tag build-image.sh pushed)"
+
+    - name: Create the bundle folder (private)
+      ansible.builtin.file:
+        path: "{{ bundle }}"
+        state: directory
+        mode: "0700"
+
+    - name: Write the credentials (private, never printed)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        cd "{{ bundle }}"
+        kubectl -n academy-labs get secret academy-lab-controller-token -o jsonpath='{.data.token}' | base64 -d > controller.token
+        kubectl -n academy-labs get secret academy-lab-controller-token -o jsonpath='{.data.ca\.crt}' | base64 -d > cluster-ca.crt
+        kubectl -n academy-viewer get secret academy-lab-viewer-cert -o jsonpath='{.data.tls\.crt}' | base64 -d > viewer.crt
+        kubectl -n academy-viewer get secret academy-lab-viewer-cert -o jsonpath='{.data.tls\.key}' | base64 -d > viewer.key
+        kubectl -n academy-viewer get secret academy-viewer-json -o jsonpath='{.data.key}' | base64 -d > viewer-json.key
+        for f in controller.token cluster-ca.crt viewer.crt viewer.key viewer-json.key; do [[ -s $f ]] || { echo "missing $f" >&2; exit 1; }; done
+      args: { executable: /bin/bash }
+      no_log: true
+
+    - name: Write the settings for each site
+      ansible.builtin.copy:
+        dest: "{{ bundle }}/{{ item }}.env"
+        mode: "0600"
+        content: |
+          # Scott Academy labs ({{ item }} site). Installed by install-on-academy-host.sh.
+          ACADEMY_LABS_DIR=/etc/scottacademy/labs
+          ACADEMY_LABS_K8S_URL={{ academy_k8s_api_url }}
+          ACADEMY_LABS_IMAGE={{ academy_lab_image }}
+          ACADEMY_LABS_SITE={{ item }}
+          ACADEMY_VIEWER_URL={{ academy_viewer_url }}
+      loop: [live, dev]
+
+    - name: Add the installer
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../academy-labs/install-on-academy-host.sh"
+        dest: "{{ bundle }}/install.sh"
+        mode: "0700"
+
+    - name: Next step
+      ansible.builtin.debug:
+        msg:
+          - "Bundle ready in {{ bundle }}. Copy it to turing-manager and install it there:"
+          - "  scp -r {{ bundle }} piadmin@turing-manager:"
+          - "  ssh -t piadmin@turing-manager sudo ./academy-labs-bundle/install.sh"
+          - "Then delete it here: rm -rf {{ bundle }}"
