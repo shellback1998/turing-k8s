@@ -93,7 +93,7 @@
   hosts: turing_workers
   become: true
   gather_facts: false
-  tags: [prepull]
+  tags: [prepull, never]   # runs only with --tags prepull
 
   vars:
     academy_lab_image: "192.168.8.191:5000/academy-lab-linux:{{ academy_lab_image_tag }}"
