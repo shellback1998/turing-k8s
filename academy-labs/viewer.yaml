@@ -21,13 +21,13 @@ spec:
     metadata: { labels: { app: guacd } }
     spec:
       automountServiceAccountToken: false
-      # Infrastructure, not a lab: prefer k8s-manager (amd64, most disk and memory) over the Pi workers.
+      # guacd makes the connections: it must run on k8s-manager, the node on the tailnet, to
+      # reach Windows lab VMs over Tailscale (RDP). Pod traffic leaves through the node's tailscale0.
       affinity:
         nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
                   - { key: node-role.kubernetes.io/control-plane, operator: Exists }
       containers:
         - name: guacd
