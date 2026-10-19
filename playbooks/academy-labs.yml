@@ -118,3 +118,13 @@
       register: pull
       changed_when: "'Image is up to date' in pull.stdout or 'sha256:' in pull.stdout"
       when: not ansible_check_mode
+
+    - name: Remove older lab images to free disk (images still in use are kept)
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s crictl images | awk -v tag="{{ academy_lab_image_tag }}" '$1 ~ /academy-lab-linux$/ && $2 != tag {print $3}' \
+          | xargs -r -n1 k3s crictl rmi 2>&1 | grep -c Deleted || true
+      args: { executable: /bin/bash }
+      register: pruned
+      changed_when: pruned.stdout | int > 0
+      when: not ansible_check_mode
